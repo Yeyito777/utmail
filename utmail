@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+python="$root/.venv/bin/python"
+
+if [[ ! -x "$python" ]]; then
+  printf 'utmail: isolated environment is missing\n' >&2
+  printf 'Run: uv sync --project %s\n' "$root" >&2
+  exit 127
+fi
+
+export PYTHONPATH="$root/src${PYTHONPATH:+:$PYTHONPATH}"
+exec "$python" -m utmail_tool.cli "$@"

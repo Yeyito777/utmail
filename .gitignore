@@ -1,0 +1,35 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Local credentials and browser/session state
+.env
+.env.*
+!.env.example
+session.json
+session.lock
+browser-profile/
+.auth/
+state/
+
+# Local downloads and temporary files
+downloads/
+*.tmp
+*.swp
+*~
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
