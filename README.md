@@ -12,8 +12,8 @@ An unofficial, user-local, read-only CLI for a University of Toronto Outlook Web
 - Private persistent Microsoft/U of T sign-in through Playwright Chromium.
 - Automatic access-token rotation.
 - Headless browser-session recovery after Microsoft's approximately 24-hour browser-SPA refresh window.
-- Read-only Inbox summaries and mailbox search.
-- Explicit message-body and conversation retrieval.
+- Read-only Inbox summaries and mailbox search, with composable age/unread filters.
+- Explicit message-body and conversation retrieval, with opt-in link and compact-body views.
 - Safe attachment listing and bounded private downloads.
 - Stable JSON output for automation.
 - Strict HTTPS origin/path allowlists, disabled redirects, bounded retries and response sizes.
@@ -105,9 +105,9 @@ utmail logout [--json]
 utmail status [--json]
 utmail whoami [--json]
 utmail inbox [--limit N] [--since DURATION] [--unread] [--json]
-utmail search QUERY [--limit N] [--json]
-utmail show MESSAGE_ID [--json]
-utmail thread CONVERSATION_ID [--limit N] [--json]
+utmail search QUERY [--limit N] [--since DURATION] [--unread] [--json]
+utmail show MESSAGE_ID [--links] [--compact] [--json]
+utmail thread CONVERSATION_ID [--limit N] [--links] [--compact] [--json]
 utmail attachments MESSAGE_ID [--json]
 utmail download MESSAGE_ID ATTACHMENT_ID --out DIRECTORY [--force] [--json]
 ```
@@ -117,14 +117,37 @@ Examples:
 ```bash
 ./utmail status
 ./utmail inbox --since 2d --unread
-./utmail search 'from:registrar@utoronto.ca enrolment'
+./utmail search 'from:registrar@utoronto.ca enrolment' --since 2w --unread
 ./utmail show MESSAGE_ID
-./utmail thread CONVERSATION_ID
+./utmail show MESSAGE_ID --links
+./utmail thread CONVERSATION_ID --compact
+./utmail thread CONVERSATION_ID --links --compact
 ./utmail attachments MESSAGE_ID
 ./utmail download MESSAGE_ID ATTACHMENT_ID --out ~/Downloads
 ```
 
-Inbox and search output omit message bodies. Only explicit `show` and `thread` commands display bodies. Downloads are capped at 100 MiB, written with mode `0600`, reject symlink output directories, and refuse overwrite unless `--force` is supplied.
+Inbox and search output omit message bodies. Only explicit `show` and `thread` commands retrieve bodies. Downloads are capped at 100 MiB, written with mode `0600`, reject symlink output directories, and refuse overwrite unless `--force` is supplied.
+
+### Search filter semantics
+
+`--since DURATION` accepts a positive integer followed by `m`, `h`, `d`, or `w` (for example, `30m` or `2w`). It includes a result when its `ReceivedDateTime` is at or after the UTC instant calculated when the command starts. A result with a missing or invalid received timestamp does not pass `--since`. `--unread` includes only results whose Outlook `IsRead` value is exactly false. The two filters compose with AND.
+
+Outlook does not reliably combine its mailbox `$search` operation with OData filters, so filtered search is deliberately bounded and deterministic: `utmail` asks Outlook for at most the first 100 candidates in Outlook's search ordering, applies `--since` and `--unread` locally without fetching message bodies, preserves candidate order, then emits at most `--limit` matches. An unfiltered search retains the existing behavior of requesting only `--limit` candidates. This fixed candidate window may return fewer than `--limit` matches even if matching mail exists later in the mailbox search results; it never causes an unbounded scan.
+
+### Link view
+
+`show --links` and `thread --links` replace each selected message's `body` field/view with a clean ordered `links` list. Only HTTP(S) URLs are extracted. Each JSON link has stable `url`, `text`, `context`, and `decodedSafeLink` fields. Exact destination duplicates are removed within a message while keeping the first body occurrence. Thread output intentionally keeps a destination when it occurs in different messages so its message-level context is not lost.
+
+Microsoft Outlook SafeLinks are decoded entirely locally only when the wrapper uses HTTPS on the exact `safelinks.protection.outlook.com` host or one of its subdomains and its `url` parameter is an absolute HTTP(S) destination. A malformed wrapper, unsafe destination scheme, or lookalike host is left as the original HTTP(S) URL. The helper never opens, resolves, fetches, validates remotely, or follows an extracted link.
+
+### Compact body view
+
+`show --compact` and `thread --compact` opt into conservative deterministic tail removal. Default body and JSON output are unchanged. Compact mode removes only:
+
+- a recognized confidentiality/disclaimer marker whose remaining tail is at least 400 characters and five non-empty lines; or
+- a conventional `--` signature tail of at least 600 characters and eight non-empty lines that also contains an institutional identifier and at least two contact/address signals.
+
+Ordinary short signatures, quoted content without those signals, and ordinary body text are retained. In compact JSON, `bodyCompaction` always reports `truncated`, `removedCharacters`, and `reason`; human output announces any removal. With `--compact --links`, links are extracted after compaction, `body` remains omitted, and `bodyCompaction` still records whether a footer was excluded.
 
 ## Read-only network boundary
 
@@ -183,7 +206,7 @@ uv run playwright install chromium
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-The current suite covers token validation and redaction, private atomic storage, exact optional browser import, endpoint allowlisting, bounded retries, mail normalization, safe attachments, refresh rotation, invalid-grant fallback, concurrent renewal, and browser-profile recovery.
+The current suite covers token validation and redaction, private atomic storage, exact optional browser import, endpoint allowlisting, bounded retries, mail normalization, bounded/composable search filters, local SafeLinks decoding and link views, conservative compact-body projections, stable CLI output, safe attachments, refresh rotation, invalid-grant fallback, concurrent renewal, and browser-profile recovery.
 
 ## License
 

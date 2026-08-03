@@ -35,7 +35,7 @@
 - Session/config/profile directories are mode `0700`; structured credential files are mode `0600` and replaced atomically.
 - The browser profile may contain many Chromium-created files with varying individual modes; the mode `0700` profile root prevents access by other local users.
 - Downloads are regular files with mode `0600`, reject symlink directories, refuse overwrite without `--force`, and have a fixed size ceiling.
-- Inbox/search summaries omit bodies. Only explicit `show` and `thread` commands display message bodies.
+- Inbox/search summaries omit bodies. Only explicit `show` and `thread` commands retrieve message bodies. Their optional link extraction and compact-body processing are local transformations; extracted links, including decoded Outlook SafeLink destinations, are never fetched or followed.
 - This design does not protect against malware or another process already running as the mailbox owner's Unix user.
 
 ## Support and revocation limits

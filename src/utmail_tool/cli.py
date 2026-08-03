@@ -66,7 +66,7 @@ def _print_rows(rows: list[dict[str, Any]]) -> None:
             print(f"  Thread:  {row['conversationId']}")
 
 
-def _print_message(message: dict[str, Any]) -> None:
+def _print_message_header(message: dict[str, Any]) -> None:
     print(f"Subject: {message.get('subject') or '(no subject)'}")
     print(f"From:    {_address(message.get('from'))}")
     print(f"To:      {', '.join(_address(value) for value in message.get('to', [])) or '-'}")
@@ -75,7 +75,42 @@ def _print_message(message: dict[str, Any]) -> None:
     print(f"Date:    {message.get('receivedAt') or message.get('sentAt') or '-'}")
     print(f"ID:      {message.get('id') or '-'}")
     print(f"Thread:  {message.get('conversationId') or '-'}")
-    print("\n" + str(message.get("body") or message.get("bodyPreview") or ""))
+
+
+def _print_message(message: dict[str, Any]) -> None:
+    _print_message_header(message)
+    compaction = message.get("bodyCompaction")
+    body = message.get("body") if isinstance(compaction, dict) else (
+        message.get("body") or message.get("bodyPreview") or ""
+    )
+    print("\n" + str(body or ""))
+    if isinstance(compaction, dict) and compaction.get("truncated"):
+        print(
+            f"\n[Compact mode removed {compaction.get('removedCharacters', 0)} "
+            f"signature/disclaimer characters.]"
+        )
+
+
+def _print_link_message(message: dict[str, Any]) -> None:
+    _print_message_header(message)
+    links = message.get("links")
+    print()
+    if not isinstance(links, list) or not links:
+        print("No links found.")
+    else:
+        for index, link in enumerate(links, 1):
+            decoded = " (decoded Outlook SafeLink)" if link.get("decodedSafeLink") else ""
+            print(f"{index}. {link.get('url') or '-'}{decoded}")
+            if link.get("text"):
+                print(f"   Text:    {link['text']}")
+            if link.get("context"):
+                print(f"   Context: {link['context']}")
+    compaction = message.get("bodyCompaction")
+    if isinstance(compaction, dict) and compaction.get("truncated"):
+        print(
+            f"\n[Compact mode excluded {compaction.get('removedCharacters', 0)} "
+            f"signature/disclaimer characters from link extraction.]"
+        )
 
 
 def _mailbox() -> tuple[OwaSession, Mailbox, Attachments]:
@@ -175,19 +210,34 @@ def command_inbox(args: argparse.Namespace) -> None:
 
 def command_search(args: argparse.Namespace) -> None:
     _, mailbox, _ = _mailbox()
-    rows = mailbox.search(args.query, limit=args.limit)
+    rows = mailbox.search(
+        args.query,
+        limit=args.limit,
+        since=parse_duration(args.since) if args.since else None,
+        unread=args.unread,
+    )
     emit_json(rows) if args.json else _print_rows(rows)
 
 
 def command_show(args: argparse.Namespace) -> None:
     _, mailbox, _ = _mailbox()
-    result = mailbox.show(args.message_id)
-    emit_json(result) if args.json else _print_message(result)
+    result = mailbox.show(args.message_id, compact=args.compact, links=args.links)
+    if args.json:
+        emit_json(result)
+    elif args.links:
+        _print_link_message(result)
+    else:
+        _print_message(result)
 
 
 def command_thread(args: argparse.Namespace) -> None:
     _, mailbox, _ = _mailbox()
-    rows = mailbox.thread(args.conversation_id, limit=args.limit)
+    rows = mailbox.thread(
+        args.conversation_id,
+        limit=args.limit,
+        compact=args.compact,
+        links=args.links,
+    )
     if args.json:
         emit_json(rows)
         return
@@ -196,7 +246,7 @@ def command_thread(args: argparse.Namespace) -> None:
         return
     for index, row in enumerate(rows, 1):
         print(f"\n=== Message {index} of {len(rows)} ===")
-        _print_message(row)
+        _print_link_message(row) if args.links else _print_message(row)
 
 
 def command_attachments(args: argparse.Namespace) -> None:
@@ -272,15 +322,21 @@ def parser() -> argparse.ArgumentParser:
     search = commands.add_parser("search", help="search mailbox message summaries")
     search.add_argument("query")
     search.add_argument("--limit", "-n", type=int, default=20)
+    search.add_argument("--since", help="only matches received within a duration such as 2d")
+    search.add_argument("--unread", action="store_true", help="only matches whose read state is unread")
     add_json(search)
     search.set_defaults(func=command_search)
     show = commands.add_parser("show", help="show one explicit message including its body")
     show.add_argument("message_id")
+    show.add_argument("--links", action="store_true", help="show deduplicated links instead of the body")
+    show.add_argument("--compact", action="store_true", help="conservatively remove a large signature/disclaimer tail")
     add_json(show)
     show.set_defaults(func=command_show)
     thread = commands.add_parser("thread", help="show an explicit conversation including message bodies")
     thread.add_argument("conversation_id")
     thread.add_argument("--limit", "-n", type=int, default=100)
+    thread.add_argument("--links", action="store_true", help="show per-message deduplicated links instead of bodies")
+    thread.add_argument("--compact", action="store_true", help="conservatively remove large signature/disclaimer tails")
     add_json(thread)
     thread.set_defaults(func=command_thread)
     attachments = commands.add_parser("attachments", help="list attachments on one message")
