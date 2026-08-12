@@ -53,7 +53,12 @@ class AuthRunner:
                     "tabs": [{"id": 4, "url": "https://example.com/", "active": True}],
                 })
         elif args == ["open-context", "utmail-helper", "https://outlook.cloud.microsoft/mail/"]:
-            output = json.dumps({"ok": True, "active_tabid": 9, "context": "utmail-helper"})
+            output = json.dumps({
+                "ok": True,
+                "active_tabid": 9,
+                "context": "utmail-helper",
+                "url": "https://outlook.cloud.microsoft/mail/",
+            })
         elif args == ["frame-tree", "9"]:
             output = json.dumps({"ok": True, "tabid": 9, "main_frame_id": "main"})
         elif args == ["frame-js", "9", "main"]:
@@ -152,7 +157,44 @@ class VimbrowserAuthenticatorTests(unittest.TestCase):
         calls = []
         with self.assertRaises(BrowserImportError):
             VimbrowserAuthenticator(context="UTmail helper", runner=lambda *args, **kwargs: calls.append(args))
+        with self.assertRaises(BrowserImportError):
+            VimbrowserAuthenticator(context="a" * 49, runner=lambda *args, **kwargs: calls.append(args))
         self.assertEqual(calls, [])
+
+    def test_open_response_must_confirm_exact_context_and_outlook_origin(self):
+        hostile_responses = [
+            {"active_tabid": 9, "context": "other", "url": "https://outlook.cloud.microsoft/mail/"},
+            {"active_tabid": 9, "context": "utmail-helper", "url": "https://outlook.cloud.microsoft.evil.example/mail/"},
+            {"active_tabid": 9, "context": "utmail-helper"},
+        ]
+
+        for opened in hostile_responses:
+            with self.subTest(opened=opened):
+                class OpenRunner:
+                    def __init__(self, response):
+                        self.calls = []
+                        self.response = response
+
+                    def __call__(self, command, **kwargs):
+                        self.calls.append(command[1:])
+                        if command[1:] == ["tabs", "--json"]:
+                            output = json.dumps({
+                                "active_tabid": 4,
+                                "tabs": [{"id": 4, "url": "https://example.com/", "active": True}],
+                            })
+                        elif command[1:2] == ["open-context"]:
+                            output = json.dumps(self.response)
+                        elif command[1:] == ["focus", "4"]:
+                            output = "{}"
+                        else:
+                            raise AssertionError(command)
+                        return subprocess.CompletedProcess(command, 0, output, "")
+
+                runner = OpenRunner(opened)
+                auth = VimbrowserAuthenticator(context="utmail-helper", runner=runner)
+                with self.assertRaises(BrowserImportError):
+                    auth.acquire(mailbox="student@example.edu", interactive=True)
+                self.assertFalse(any(command[:1] == ["close-tab"] for command in runner.calls))
 
     def test_cached_refresh_account_must_match_access_token_identity(self):
         class WrongAccountRunner(AuthRunner):

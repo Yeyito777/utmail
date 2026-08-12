@@ -18,7 +18,7 @@ OUTLOOK_URL = "https://outlook.cloud.microsoft/mail/"
 MAX_CLI_OUTPUT_BYTES = 512 * 1024
 COMMAND_TIMEOUT_SECONDS = 20.0
 POLL_SECONDS = 0.5
-CONTEXT_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+CONTEXT_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
 
 
 CAPTURE_JS = r"""
@@ -368,7 +368,7 @@ class VimbrowserAuthenticator(VimbrowserDelegate):
         self.context = vimbrowser_context() if context is None else context
         if not isinstance(self.context, str) or not CONTEXT_PATTERN.fullmatch(self.context):
             raise BrowserImportError(
-                "UTMAIL_VIMBROWSER_CONTEXT must contain only lowercase letters, numbers, '_' or '-'"
+                "UTMAIL_VIMBROWSER_CONTEXT must be 1-48 lowercase letters, numbers, '_' or '-'"
             )
 
     def _remaining(self, deadline: float) -> float:
@@ -402,8 +402,16 @@ class VimbrowserAuthenticator(VimbrowserDelegate):
             if candidate_id in before_ids:
                 raise BrowserImportError("vimbrowser did not identify a new helper-opened tab")
             returned_context = opened.get("context", opened.get("context_name"))
-            if returned_context is not None and returned_context != self.context:
-                raise BrowserImportError("vimbrowser opened a tab in a different browser context")
+            if (
+                returned_context != self.context
+                or not isinstance(opened.get("url"), str)
+                or not self._is_outlook_url(opened["url"])
+            ):
+                # Do not close an ID unless vimbrowser confirms that it belongs to
+                # the exact context and origin this helper just requested.
+                raise BrowserImportError(
+                    "vimbrowser did not confirm the exact newly opened Outlook context tab"
+                )
             helper_tab_id = candidate_id
 
             while self.clock() < deadline:
@@ -412,7 +420,7 @@ class VimbrowserAuthenticator(VimbrowserDelegate):
                 if len(matches) != 1:
                     raise BrowserImportError("the exact helper-opened Outlook tab is no longer available")
                 tab = matches[0]
-                if tab.context is not None and tab.context != self.context:
+                if tab.context != self.context:
                     raise BrowserImportError("the helper-opened tab changed browser context")
                 if self._is_outlook_url(tab.url):
                     try:

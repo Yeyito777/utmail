@@ -10,7 +10,7 @@ import requests
 
 from .errors import NetworkError, SessionRejectedError, SessionRequiredError
 from .paths import lock_path, session_path
-from .session import EXPIRY_LEEWAY_SECONDS, OWA_APP_ID, OwaSession
+from .session import OWA_APP_ID, OwaSession
 from .storage import atomic_write_json, exclusive_lock, read_private_json
 from .vimbrowser import VimbrowserAuthenticator
 

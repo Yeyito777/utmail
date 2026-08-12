@@ -14,6 +14,7 @@
 - Credentials are never accepted in argv, printed, logged, included in errors, or emitted as JSON.
 - `session.json` is protected by a mode `0700` parent directory, is mode `0600`, and is replaced atomically under a process lock. The state is not separately encrypted at rest, so compromise of the owner's Unix account can expose it. vimbrowser is independently responsible for protecting its context storage.
 - `utmail logout` deletes only the helper-owned access/refresh-token state. The vimbrowser context remains and may still be signed in; logout neither revokes Microsoft server-side sessions nor signs out vimbrowser.
+- Legacy releases stored browser state in `~/.local/state/utmail/browser-profile/`. Version 0.4 no longer reads or manages that Playwright profile; remove it after migration so obsolete signed-in state is not retained.
 
 ## Renewal network boundary
 

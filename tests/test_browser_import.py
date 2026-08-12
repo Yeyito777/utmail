@@ -5,8 +5,8 @@ import subprocess
 import unittest
 
 from helpers import token
+from utmail_tool.browser_import import CAPTURE_JS, READ_CAPTURE_JS, TRIGGER_JS, VimbrowserImporter
 from utmail_tool.errors import BrowserImportError
-from utmail_tool.vimbrowser import CAPTURE_JS, READ_CAPTURE_JS, TRIGGER_JS, VimbrowserImporter
 
 
 class FakeRunner:

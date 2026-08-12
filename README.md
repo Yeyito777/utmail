@@ -177,10 +177,12 @@ UTMAIL_MAILBOX
 UTMAIL_SESSION_FILE
 UTMAIL_SESSION_LOCK_FILE
 UTMAIL_VIMBROWSER_CLI
-UTMAIL_VIMBROWSER_CONTEXT   # default: utmail-helper
+UTMAIL_VIMBROWSER_CONTEXT   # default: utmail-helper; 1-48 lowercase letters/digits/_/-
 ```
 
 `utmail logout` removes only the helper-owned token file. It does not delete or sign out the vimbrowser-owned context, revoke Microsoft server-side sessions, or sign out other browser contexts. Use vimbrowser/Microsoft account controls when that browser session must also be removed or revoked.
+
+Releases before 0.4 used `~/.local/state/utmail/browser-profile/`. That legacy Playwright profile is no longer read or managed. After confirming the named vimbrowser context works, remove the old directory if it still exists so it does not retain obsolete signed-in browser state.
 
 ## JSON and exit codes
 
@@ -195,7 +197,7 @@ Successful JSON has `schemaVersion: 1` and a `data` value. Errors use the same s
 | 4 | Session rejected or belongs to another account |
 | 5 | Outlook/network/protocol failure |
 | 6 | Unsafe or invalid local file operation |
-| 7 | Optional vimbrowser import failure |
+| 7 | vimbrowser delegation/import failure |
 
 ## Development
 
