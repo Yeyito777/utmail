@@ -19,10 +19,9 @@ def lock_path() -> Path:
     return Path(override).expanduser() if override else state_dir() / "session.lock"
 
 
-def browser_profile_path() -> Path:
-    override = os.environ.get("UTMAIL_BROWSER_PROFILE")
-    return Path(override).expanduser() if override else state_dir() / "browser-profile"
-
-
 def vimbrowser_cli() -> str:
     return os.environ.get("UTMAIL_VIMBROWSER_CLI", "vimbrowser-cli")
+
+
+def vimbrowser_context() -> str:
+    return os.environ.get("UTMAIL_VIMBROWSER_CONTEXT", "utmail-helper").strip()

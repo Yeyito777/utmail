@@ -10,9 +10,9 @@ import requests
 
 from .errors import NetworkError, SessionRejectedError, SessionRequiredError
 from .paths import lock_path, session_path
-from .persistent_browser import PersistentBrowserAuthenticator
 from .session import EXPIRY_LEEWAY_SECONDS, OWA_APP_ID, OwaSession
 from .storage import atomic_write_json, exclusive_lock, read_private_json
+from .vimbrowser import VimbrowserAuthenticator
 
 
 TOKEN_ORIGIN = "https://outlook.cloud.microsoft"
@@ -87,7 +87,7 @@ def load_or_refresh_session(
     path: Path | None = None,
     lock: Path | None = None,
     direct_refresher: Callable[[OwaSession], OwaSession] = refresh_direct,
-    browser_authenticator: PersistentBrowserAuthenticator | None = None,
+    browser_authenticator: VimbrowserAuthenticator | None = None,
 ) -> OwaSession:
     target = path or session_path()
     lock_target = lock or lock_path()
@@ -114,14 +114,14 @@ def load_or_refresh_session(
             except (SessionRequiredError, SessionRejectedError):
                 renewed = None
         if renewed is None:
-            if session.renewal_mode != "persistent-browser":
+            if session.renewal_mode != "vimbrowser":
                 raise SessionRequiredError(
                     "the imported OWA token expired; run `utmail login --persistent` for automatic renewal"
                 )
-            authenticator = browser_authenticator or PersistentBrowserAuthenticator()
+            authenticator = browser_authenticator or VimbrowserAuthenticator()
             renewed = authenticator.acquire(mailbox=session.mailbox, interactive=False)
             if renewed.tenant_id != session.tenant_id or renewed.object_id != session.object_id:
-                raise SessionRejectedError("the helper-owned browser authenticated a different account")
+                raise SessionRejectedError("the named vimbrowser context authenticated a different account")
 
         renewed.assert_current()
         atomic_write_json(target, asdict(renewed))

@@ -43,7 +43,20 @@ class SessionStorageTests(unittest.TestCase):
         self.assertNotIn(access, public)
         self.assertNotIn(refresh, public)
         self.assertTrue(value.public()["automaticRenewal"])
-        self.assertEqual(value.public()["renewalMode"], "persistent-browser")
+        self.assertEqual(value.public()["renewalMode"], "vimbrowser")
+
+    def test_persistent_browser_session_is_migrated_in_memory(self):
+        value = OwaSession.from_vimbrowser_tokens(
+            token(),
+            "r" * 512,
+            refresh_token_expires_at=int(time.time()) + 86_400,
+            mailbox="student@example.edu",
+        )
+        legacy = {**value.__dict__, "renewal_mode": "persistent-browser", "source": "persistent-browser"}
+        migrated = OwaSession.from_dict(legacy)
+        self.assertEqual(migrated.renewal_mode, "vimbrowser")
+        self.assertEqual(migrated.source, "vimbrowser-context")
+        self.assertTrue(migrated.public()["automaticRenewal"])
 
     def test_private_atomic_round_trip_and_logout(self):
         with tempfile.TemporaryDirectory() as directory:

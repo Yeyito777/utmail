@@ -5,8 +5,8 @@ import subprocess
 import unittest
 
 from helpers import token
-from utmail_tool.browser_import import CAPTURE_JS, READ_CAPTURE_JS, TRIGGER_JS, VimbrowserImporter
 from utmail_tool.errors import BrowserImportError
+from utmail_tool.vimbrowser import CAPTURE_JS, READ_CAPTURE_JS, TRIGGER_JS, VimbrowserImporter
 
 
 class FakeRunner:
@@ -57,6 +57,15 @@ class BrowserImportTests(unittest.TestCase):
         runner = FakeRunner([
             {"id": 5, "url": "https://outlook.cloud.microsoft/mail/", "active": False},
             {"id": 6, "url": "https://outlook.cloud.microsoft/mail/inbox", "active": False},
+        ])
+        importer = VimbrowserImporter(runner=runner, sleeper=lambda _: None)
+        with self.assertRaises(BrowserImportError):
+            importer.import_bearer()
+
+    def test_malformed_or_lookalike_outlook_urls_are_not_candidates(self):
+        runner = FakeRunner([
+            {"id": 5, "url": "https://outlook.cloud.microsoft:invalid/mail/", "active": False},
+            {"id": 6, "url": "https://outlook.cloud.microsoft.evil.example/mail/", "active": False},
         ])
         importer = VimbrowserImporter(runner=runner, sleeper=lambda _: None)
         with self.assertRaises(BrowserImportError):

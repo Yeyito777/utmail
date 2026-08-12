@@ -20,7 +20,7 @@ OWA_BASE_URL = "https://outlook.cloud.microsoft"
 DEFAULT_MAILBOX = os.environ.get("UTMAIL_MAILBOX", "").strip()
 SESSION_VERSION = 2
 EXPIRY_LEEWAY_SECONDS = 60
-RENEWAL_MODES = {"none", "persistent-browser"}
+RENEWAL_MODES = {"none", "vimbrowser"}
 
 
 def utc_iso(timestamp: int | float) -> str:
@@ -137,6 +137,32 @@ class OwaSession:
         )
 
     @classmethod
+    def from_vimbrowser_tokens(
+        cls,
+        access_token: str,
+        refresh_token: str,
+        *,
+        refresh_token_expires_at: int,
+        mailbox: str = DEFAULT_MAILBOX,
+        source: str = "vimbrowser-context",
+    ) -> "OwaSession":
+        session = cls.from_token(access_token, mailbox=mailbox, source=source)
+        renewable = normalize_refresh_token(refresh_token)
+        expiry = int(refresh_token_expires_at)
+        if expiry <= 0:
+            raise SessionRejectedError("the captured OWA renewable credential has no valid expiry metadata")
+        # Outlook may still hold a valid access token after the SPA
+        # refresh token's hard 24-hour window. Preserve that access token as a
+        # bridge; can_refresh_directly() will refuse the stale refresh token and
+        # the named vimbrowser context can reauthorize when the access token ends.
+        return replace(
+            session,
+            refresh_token=renewable,
+            refresh_token_expires_at=expiry,
+            renewal_mode="vimbrowser",
+        )
+
+    @classmethod
     def from_persistent_tokens(
         cls,
         access_token: str,
@@ -144,22 +170,15 @@ class OwaSession:
         *,
         refresh_token_expires_at: int,
         mailbox: str = DEFAULT_MAILBOX,
-        source: str = "persistent-browser",
+        source: str = "vimbrowser-context",
     ) -> "OwaSession":
-        session = cls.from_token(access_token, mailbox=mailbox, source=source)
-        renewable = normalize_refresh_token(refresh_token)
-        expiry = int(refresh_token_expires_at)
-        if expiry <= 0:
-            raise SessionRejectedError("the captured OWA renewable credential has no valid expiry metadata")
-        # The browser may still hold a valid Outlook access token after the SPA
-        # refresh token's hard 24-hour window. Preserve that access token as a
-        # bridge; can_refresh_directly() will refuse the stale refresh token and
-        # the owned browser will silently reauthorize when the access token ends.
-        return replace(
-            session,
-            refresh_token=renewable,
-            refresh_token_expires_at=expiry,
-            renewal_mode="persistent-browser",
+        """Compatibility constructor for callers using the pre-vimbrowser name."""
+        return cls.from_vimbrowser_tokens(
+            access_token,
+            refresh_token,
+            refresh_token_expires_at=refresh_token_expires_at,
+            mailbox=mailbox,
+            source=source,
         )
 
     @classmethod
@@ -172,6 +191,12 @@ class OwaSession:
                 refresh_token_expires_at=None,
                 renewal_mode="none",
             )
+        if data.get("renewal_mode") == "persistent-browser":
+            # Version-2 sessions from releases before 0.4 remain wire-compatible.
+            # Only ownership/renewal terminology changes; credentials are untouched.
+            data["renewal_mode"] = "vimbrowser"
+            if data.get("source") == "persistent-browser":
+                data["source"] = "vimbrowser-context"
         try:
             session = cls(**data)
         except (TypeError, KeyError, ValueError):
@@ -180,7 +205,15 @@ class OwaSession:
             raise SessionRejectedError("the saved UTmail session has an unsupported format")
         if session.renewal_mode not in RENEWAL_MODES:
             raise SessionRejectedError("the saved UTmail session has an invalid renewal mode")
-        validate_token(session.access_token, require_current=False)
+        claims = validate_token(session.access_token, require_current=False)
+        if (
+            session.tenant_id != str(claims["tid"])
+            or session.object_id != str(claims["oid"])
+            or session.app_id != str(claims.get("appid") or claims.get("azp"))
+            or session.expires_at != int(claims["exp"])
+        ):
+            raise SessionRejectedError("the saved UTmail session identity does not match its bearer")
+        normalize_mailbox(session.mailbox)
         if session.refresh_token is not None:
             normalize_refresh_token(session.refresh_token)
         return session
@@ -207,7 +240,7 @@ class OwaSession:
             refresh_token=normalize_refresh_token(refresh_token),
             imported_at=int(time.time()),
             expires_at=int(claims["exp"]),
-            source="persistent-browser",
+            source=self.source,
         )
 
     def public(self) -> dict[str, Any]:
@@ -218,7 +251,7 @@ class OwaSession:
             "importedAt": utc_iso(self.imported_at),
             "expiresAt": utc_iso(self.expires_at),
             "secondsRemaining": max(0, self.expires_at - int(time.time())),
-            "automaticRenewal": self.renewal_mode == "persistent-browser",
+            "automaticRenewal": self.renewal_mode == "vimbrowser",
             "renewalMode": self.renewal_mode,
         }
         if self.refresh_token_expires_at:

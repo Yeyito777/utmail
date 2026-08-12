@@ -30,22 +30,22 @@ class CliTests(unittest.TestCase):
         self.assertEqual(self.run_cli("--help").returncode, 0)
         version = self.run_cli("--version")
         self.assertEqual(version.returncode, 0)
-        self.assertIn("0.3.1", version.stdout)
+        self.assertIn("0.4.0", version.stdout)
 
     def test_persistent_login_requires_explicit_mailbox_without_environment_default(self):
         with tempfile.TemporaryDirectory() as directory:
-            profile = Path(directory) / "browser-profile"
+            session = Path(directory) / "session.json"
             result = self.run_cli(
                 "login", "--persistent", "--json",
                 env={
                     "UTMAIL_MAILBOX": "",
-                    "UTMAIL_BROWSER_PROFILE": str(profile),
+                    "UTMAIL_SESSION_FILE": str(session),
                 },
             )
         self.assertEqual(result.returncode, 2)
         payload = json.loads(result.stderr)
         self.assertEqual(payload["error"]["kind"], "UsageError")
-        self.assertFalse(profile.exists())
+        self.assertFalse(session.exists())
 
     def test_unconfigured_json_error_is_stable_and_contains_no_token(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -61,6 +61,23 @@ class CliTests(unittest.TestCase):
         self.assertEqual(payload["schemaVersion"], 1)
         self.assertEqual(payload["error"]["kind"], "SessionRequiredError")
         self.assertNotIn("access_token", result.stderr)
+
+    def test_logout_json_removes_only_utmail_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = Path(directory) / "session.json"
+            session.write_text("local helper state")
+            result = self.run_cli(
+                "logout", "--json",
+                env={
+                    "UTMAIL_SESSION_FILE": str(session),
+                    "UTMAIL_SESSION_LOCK_FILE": str(Path(directory) / "lock"),
+                },
+            )
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)["data"]
+        self.assertTrue(payload["sessionRemoved"])
+        self.assertTrue(payload["vimbrowserSessionRetained"])
+        self.assertNotIn("browserProfileRemoved", payload)
 
 
 if __name__ == "__main__":

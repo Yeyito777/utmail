@@ -8,13 +8,12 @@ from typing import Any
 
 from . import __version__
 from .attachments import Attachments
-from .browser_import import VimbrowserImporter
 from .client import OwaClient
 from .errors import SessionRejectedError, UsageError, UtmailError
 from .mail import Mailbox, parse_duration
-from .persistent_browser import PersistentBrowserAuthenticator, delete_browser_profile
 from .renewal import load_or_refresh_session
 from .session import DEFAULT_MAILBOX, OwaSession, delete_session, save_session
+from .vimbrowser import VimbrowserAuthenticator, VimbrowserImporter
 
 
 SCHEMA_VERSION = 1
@@ -127,8 +126,8 @@ def command_login(args: argparse.Namespace) -> None:
         if args.tab is not None:
             raise UsageError("--tab is valid only with --from-vimbrowser")
         if not args.json:
-            print("Opening the helper-owned Outlook session. Complete Microsoft/U of T sign-in if prompted.")
-        session = PersistentBrowserAuthenticator().acquire(
+            print("Opening Outlook in the isolated UTmail vimbrowser context. Complete Microsoft/U of T sign-in if prompted.")
+        session = VimbrowserAuthenticator().acquire(
             mailbox=args.mailbox,
             interactive=True,
         )
@@ -149,29 +148,28 @@ def command_login(args: argparse.Namespace) -> None:
     account = Mailbox(OwaClient(session)).whoami()
     returned = str(account.get("emailAddress") or "").casefold()
     expected = session.mailbox.casefold()
-    if returned and returned != expected:
+    if returned != expected:
         raise SessionRejectedError("the imported OWA session belongs to a different mailbox")
     save_session(session)
     result = {**session.public(), "account": account}
     if args.json:
         emit_json(result)
     else:
-        message = "Authenticated with a helper-owned renewable Outlook session." if session.renewal_mode == "persistent-browser" else "Authenticated with an imported Outlook Web user session."
+        message = "Authenticated with a renewable Outlook session delegated to vimbrowser." if session.renewal_mode == "vimbrowser" else "Authenticated with an imported Outlook Web user session."
         print(message)
         print(f"  Mailbox: {session.mailbox}")
         print(f"  Expires: {result['expiresAt']}")
-        if session.renewal_mode == "persistent-browser":
+        if session.renewal_mode == "vimbrowser":
             print("  Renewal: automatic while Microsoft/U of T keeps the browser session valid")
 
 
 def command_logout(args: argparse.Namespace) -> None:
     removed = delete_session()
-    browser_removed = delete_browser_profile()
-    result = {"loggedOut": True, "sessionRemoved": removed, "browserProfileRemoved": browser_removed}
+    result = {"loggedOut": True, "sessionRemoved": removed, "vimbrowserSessionRetained": True}
     if args.json:
         emit_json(result)
     else:
-        print("Logged out locally and removed helper-owned Outlook credentials.")
+        print("Removed UTmail's local credentials. The vimbrowser context remains signed in and is not removed.")
 
 
 def command_status(args: argparse.Namespace) -> None:
@@ -291,7 +289,7 @@ def parser() -> argparse.ArgumentParser:
 
     login = commands.add_parser("login", help="initialize or import an Outlook Web user session")
     source = login.add_mutually_exclusive_group(required=True)
-    source.add_argument("--persistent", action="store_true", help="initialize the helper-owned renewable browser session")
+    source.add_argument("--persistent", action="store_true", help="initialize a renewable session in UTmail's named vimbrowser context")
     source.add_argument("--from-vimbrowser", action="store_true", help="capture a current bearer from one exact Outlook Web tab")
     source.add_argument("--token-stdin", action="store_true", help="read a bare bearer, Authorization header, or access_token JSON from stdin")
     login.add_argument("--tab", type=int, help="exact vimbrowser Outlook tab ID")
@@ -303,7 +301,10 @@ def parser() -> argparse.ArgumentParser:
     add_json(login)
     login.set_defaults(func=command_login)
 
-    logout = commands.add_parser("logout", help="delete only the helper's local session")
+    logout = commands.add_parser(
+        "logout",
+        help="delete only UTmail's local tokens; the vimbrowser context stays signed in",
+    )
     add_json(logout)
     logout.set_defaults(func=command_logout)
     status = commands.add_parser("status", help="validate the saved session and account")

@@ -9,7 +9,6 @@ from pathlib import Path
 from threading import Lock
 
 from helpers import token
-from utmail_tool.persistent_browser import delete_browser_profile
 from utmail_tool.renewal import load_or_refresh_session, refresh_direct
 from utmail_tool.errors import SessionRequiredError
 from utmail_tool.session import OwaSession, save_session
@@ -172,16 +171,6 @@ class RenewalTests(unittest.TestCase):
                 results = list(pool.map(lambda _: load(), range(2)))
             self.assertEqual(results, [fresh.access_token, fresh.access_token])
             self.assertEqual(calls, 1)
-
-    def test_private_browser_profile_deletion(self):
-        with tempfile.TemporaryDirectory() as directory:
-            profile = Path(directory) / "profile"
-            profile.mkdir(mode=0o700)
-            (profile / "cookie-state").write_text("secret")
-            self.assertTrue(delete_browser_profile(profile=profile))
-            self.assertFalse(profile.exists())
-            self.assertFalse(delete_browser_profile(profile=profile))
-
 
 if __name__ == "__main__":
     unittest.main()

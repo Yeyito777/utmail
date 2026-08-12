@@ -1,15 +1,12 @@
 [project]
 name = "utmail-helper"
-version = "0.3.1"
-description = "Unofficial read-only OWA CLI with a private renewable browser session"
+version = "0.4.0"
+description = "Unofficial read-only OWA CLI with renewable authentication delegated to vimbrowser"
 readme = "README.md"
 license = "MIT"
 authors = [{ name = "Aurelio Linero Barcenas" }]
 requires-python = ">=3.11"
-dependencies = [
-  "playwright==1.58.0",
-  "requests>=2.32,<3",
-]
+dependencies = ["requests>=2.32,<3"]
 
 [project.urls]
 Homepage = "https://github.com/Yeyito777/utmail"
