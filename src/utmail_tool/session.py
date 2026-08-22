@@ -163,6 +163,25 @@ class OwaSession:
         )
 
     @classmethod
+    def from_vimbrowser_bearer(
+        cls,
+        access_token: str,
+        *,
+        mailbox: str = DEFAULT_MAILBOX,
+        source: str = "vimbrowser-context",
+    ) -> "OwaSession":
+        """Create a browser-renewable session from one captured OWA request.
+
+        Current Outlook builds may keep their refresh-token cache in an opaque
+        application-owned format.  The named vimbrowser context is still the
+        durable credential owner in that case: once this short-lived bearer
+        expires, renewal reopens that exact context and captures a fresh
+        read-only mailbox request.
+        """
+        session = cls.from_token(access_token, mailbox=mailbox, source=source)
+        return replace(session, renewal_mode="vimbrowser")
+
+    @classmethod
     def from_persistent_tokens(
         cls,
         access_token: str,

@@ -8,7 +8,13 @@ import unittest
 from helpers import token
 from utmail_tool.errors import BrowserImportError, SessionRequiredError
 from utmail_tool.session import OWA_APP_ID
-from utmail_tool.vimbrowser import TOKEN_DISCOVERY_JS, VimbrowserAuthenticator
+from utmail_tool.vimbrowser import (
+    CAPTURE_JS,
+    READ_CAPTURE_JS,
+    TOKEN_DISCOVERY_JS,
+    TRIGGER_JS,
+    VimbrowserAuthenticator,
+)
 
 
 class FakeClock:
@@ -55,9 +61,16 @@ class AuthRunner:
         elif args == ["open-context", "utmail-helper", "https://outlook.cloud.microsoft/mail/"]:
             output = json.dumps({
                 "ok": True,
-                "active_tabid": 9,
-                "context": "utmail-helper",
-                "url": "https://outlook.cloud.microsoft/mail/",
+                "active_tabid": 4,
+                "tabs": [
+                    {"id": 4, "url": "https://example.com/", "active": True},
+                    {
+                        "id": 9,
+                        "url": "https://outlook.cloud.microsoft/mail/",
+                        "active": False,
+                        "context": "utmail-helper",
+                    },
+                ],
             })
         elif args == ["frame-tree", "9"]:
             output = json.dumps({"ok": True, "tabid": 9, "main_frame_id": "main"})
@@ -73,7 +86,7 @@ class AuthRunner:
                 "accountId": "object-id.tenant-id",
             }
             output = json.dumps({"ok": True, "tabid": 9, "type": "string", "result": json.dumps(value)})
-        elif args in (["close-tab", "9"], ["focus", "4"]):
+        elif args in (["focus", "9"], ["close-tab", "9"], ["focus", "4"]):
             output = "{}"
         else:
             raise AssertionError(f"unexpected command: {args}")
@@ -100,6 +113,7 @@ class VimbrowserAuthenticatorTests(unittest.TestCase):
             ["open-context", "utmail-helper", "https://outlook.cloud.microsoft/mail/"],
             commands,
         )
+        self.assertIn(["focus", "9"], commands)
         self.assertIn(["frame-tree", "9"], commands)
         self.assertIn(["frame-js", "9", "main"], commands)
         self.assertEqual(commands[-2:], [["close-tab", "9"], ["focus", "4"]])
@@ -127,6 +141,59 @@ class VimbrowserAuthenticatorTests(unittest.TestCase):
         self.assertEqual(commands[-2:], [["close-tab", "9"], ["focus", "4"]])
         self.assertFalse(any(command[:1] == ["frame-tree"] for command in commands))
 
+    def test_opaque_outlook_cache_falls_back_to_context_renewable_bearer_capture(self):
+        class OpaqueCacheRunner(AuthRunner):
+            def __init__(self):
+                super().__init__()
+                self.capture_reads = 0
+
+            def __call__(self, command, **kwargs):
+                if command[1:] == ["frame-js", "9", "main"]:
+                    script = kwargs["input"]
+                    self.calls.append((command, script, kwargs["timeout"]))
+                    if script == TOKEN_DISCOVERY_JS:
+                        value = {"ok": False, "reason": "credential-count"}
+                    elif script == CAPTURE_JS:
+                        value = {"ok": True}
+                    elif script == TRIGGER_JS:
+                        value = {"ok": True, "target": "Junk Email"}
+                    elif script == READ_CAPTURE_JS:
+                        self.capture_reads += 1
+                        value = "" if self.capture_reads == 1 else f"Bearer {self.access}"
+                        return subprocess.CompletedProcess(
+                            command,
+                            0,
+                            json.dumps({"ok": True, "tabid": 9, "result": value}),
+                            "",
+                        )
+                    else:
+                        raise AssertionError("unexpected frame script")
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        json.dumps({"ok": True, "tabid": 9, "result": json.dumps(value)}),
+                        "",
+                    )
+                return super().__call__(command, **kwargs)
+
+        runner = OpaqueCacheRunner()
+        auth = VimbrowserAuthenticator(
+            executable="vimbrowser-cli",
+            context="utmail-helper",
+            runner=runner,
+            sleeper=lambda _: None,
+        )
+        session = auth.acquire(mailbox="student@example.edu", interactive=True)
+        self.assertEqual(session.access_token, runner.access)
+        self.assertIsNone(session.refresh_token)
+        self.assertEqual(session.renewal_mode, "vimbrowser")
+        self.assertEqual(session.source, "vimbrowser-context:utmail-helper")
+        scripts = [stdin for command, stdin, _ in runner.calls if command[1:2] == ["frame-js"]]
+        self.assertIn(TOKEN_DISCOVERY_JS, scripts)
+        self.assertIn(CAPTURE_JS, scripts)
+        self.assertIn(TRIGGER_JS, scripts)
+        self.assertIn(READ_CAPTURE_JS, scripts)
+
     def test_reused_open_context_id_is_rejected_without_closing_existing_tab(self):
         class ReusedRunner:
             def __init__(self):
@@ -140,7 +207,10 @@ class VimbrowserAuthenticatorTests(unittest.TestCase):
                         "tabs": [{"id": 9, "url": "https://example.com/", "active": True}],
                     })
                 elif command[1:2] == ["open-context"]:
-                    output = json.dumps({"active_tabid": 9})
+                    output = json.dumps({
+                        "active_tabid": 9,
+                        "tabs": [{"id": 9, "url": "https://example.com/", "active": True}],
+                    })
                 elif command[1:] == ["focus", "9"]:
                     output = "{}"
                 else:
@@ -161,11 +231,18 @@ class VimbrowserAuthenticatorTests(unittest.TestCase):
             VimbrowserAuthenticator(context="a" * 49, runner=lambda *args, **kwargs: calls.append(args))
         self.assertEqual(calls, [])
 
-    def test_open_response_must_confirm_exact_context_and_outlook_origin(self):
+    def test_open_response_must_confirm_one_new_exact_https_context_tab(self):
         hostile_responses = [
-            {"active_tabid": 9, "context": "other", "url": "https://outlook.cloud.microsoft/mail/"},
-            {"active_tabid": 9, "context": "utmail-helper", "url": "https://outlook.cloud.microsoft.evil.example/mail/"},
-            {"active_tabid": 9, "context": "utmail-helper"},
+            {"active_tabid": 4, "tabs": [{"id": 4, "url": "https://example.com/", "context": "utmail-helper"}]},
+            {"active_tabid": 4, "tabs": [{"id": 9, "url": "https://outlook.cloud.microsoft/mail/", "context": "other"}]},
+            {"active_tabid": 4, "tabs": [{"id": 9, "url": "http://outlook.cloud.microsoft/mail/", "context": "utmail-helper"}]},
+            {
+                "active_tabid": 4,
+                "tabs": [
+                    {"id": 9, "url": "https://outlook.cloud.microsoft/mail/", "context": "utmail-helper"},
+                    {"id": 10, "url": "https://outlook.cloud.microsoft/mail/", "context": "utmail-helper"},
+                ],
+            },
         ]
 
         for opened in hostile_responses:

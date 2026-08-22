@@ -63,6 +63,17 @@ TRIGGER_JS = r"""
       return JSON.stringify({ok: true, target});
     }
   }
+  // Current Outlook can start with the navigation tree collapsed. Expanding
+  // the pane is a local, non-mutating UI action; the bounded caller retries
+  // this probe and then selects one of the exact read-only folder targets.
+  const expanders = [...document.querySelectorAll('button')].filter(element =>
+    element.getAttribute('aria-label') === 'Show navigation pane' &&
+    element.getClientRects().length > 0
+  );
+  if (expanders.length === 1) {
+    expanders[0].click();
+    return JSON.stringify({ok: false, target: null, expanded: true});
+  }
   return JSON.stringify({ok: false, target: null, count: 0});
 })()
 """.strip()
@@ -374,6 +385,62 @@ class VimbrowserAuthenticator(VimbrowserDelegate):
     def _remaining(self, deadline: float) -> float:
         return max(0.1, min(COMMAND_TIMEOUT_SECONDS, deadline - self.clock()))
 
+    def _new_context_tab(
+        self,
+        opened: dict[str, Any],
+        *,
+        before_ids: set[int],
+    ) -> BrowserTab:
+        """Identify the exact background tab allocated by ``open-context``.
+
+        Vimbrowser deliberately keeps the user's visible tab active when it opens
+        a background context tab.  Consequently ``active_tabid`` identifies the
+        pre-existing visible tab, not the new helper tab.  The full response is a
+        status snapshot, so identify the allocation by the new stable ID plus the
+        exact named context instead.
+        """
+        rows = opened.get("tabs")
+        if not isinstance(rows, list):
+            raise BrowserImportError("vimbrowser did not return the post-open tab list")
+        candidates: list[BrowserTab] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                tab_id = self._tab_id(row.get("id"), "open-context")
+            except BrowserImportError:
+                continue
+            context_raw = row.get("context", row.get("context_name"))
+            if tab_id in before_ids or context_raw != self.context:
+                continue
+            url = str(row.get("url") or "")
+            try:
+                parsed = urlsplit(url)
+                safe_https = (
+                    parsed.scheme == "https"
+                    and parsed.hostname is not None
+                    and parsed.port in (None, 443)
+                    and parsed.username is None
+                    and parsed.password is None
+                )
+            except ValueError:
+                safe_https = False
+            if not safe_https:
+                continue
+            candidates.append(
+                BrowserTab(
+                    id=tab_id,
+                    url=url,
+                    active=bool(row.get("active")),
+                    context=self.context,
+                )
+            )
+        if len(candidates) != 1:
+            raise BrowserImportError(
+                "vimbrowser did not identify one exact new helper-context tab"
+            )
+        return candidates[0]
+
     def acquire(
         self,
         *,
@@ -388,6 +455,7 @@ class VimbrowserAuthenticator(VimbrowserDelegate):
         original_active, before_tabs = self.tabs(timeout=self._remaining(deadline))
         before_ids = {tab.id for tab in before_tabs}
         helper_tab_id: int | None = None
+        capture_started = False
         try:
             opened = self._json(
                 self._run(
@@ -398,21 +466,13 @@ class VimbrowserAuthenticator(VimbrowserDelegate):
                 ),
                 "open-context",
             )
-            candidate_id = self._tab_id(opened.get("active_tabid"), "open-context")
-            if candidate_id in before_ids:
-                raise BrowserImportError("vimbrowser did not identify a new helper-opened tab")
-            returned_context = opened.get("context", opened.get("context_name"))
-            if (
-                returned_context != self.context
-                or not isinstance(opened.get("url"), str)
-                or not self._is_outlook_url(opened["url"])
-            ):
-                # Do not close an ID unless vimbrowser confirms that it belongs to
-                # the exact context and origin this helper just requested.
-                raise BrowserImportError(
-                    "vimbrowser did not confirm the exact newly opened Outlook context tab"
-                )
-            helper_tab_id = candidate_id
+            helper_tab = self._new_context_tab(opened, before_ids=before_ids)
+            helper_tab_id = helper_tab.id
+            if interactive:
+                # Duo's browser check is visibility-sensitive in vimbrowser.  A
+                # persistent interactive login is explicitly user-visible, so
+                # focus only this verified helper tab and restore focus below.
+                self._run("focus", str(helper_tab_id), timeout=self._remaining(deadline))
 
             while self.clock() < deadline:
                 _, tabs = self.tabs(timeout=self._remaining(deadline))
@@ -423,6 +483,7 @@ class VimbrowserAuthenticator(VimbrowserDelegate):
                 if tab.context != self.context:
                     raise BrowserImportError("the helper-opened tab changed browser context")
                 if self._is_outlook_url(tab.url):
+                    frame_id: str | None = None
                     try:
                         frame_id = self._frame_id(helper_tab_id, timeout=self._remaining(deadline))
                         result = self._js_object(
@@ -459,6 +520,57 @@ class VimbrowserAuthenticator(VimbrowserDelegate):
                                 "Outlook's renewable credential belongs to a different cached account"
                             )
                         return session
+                    # Newer Outlook builds may expose only opaque application
+                    # cache records instead of the individual MSAL refresh-token
+                    # records above.  In that case, preserve automatic renewal
+                    # through the same named browser context by capturing one
+                    # ordinary read-only OWA request.  The capture is scoped to
+                    # this exact helper tab and disappears when it is closed.
+                    if frame_id is not None:
+                        try:
+                            if not capture_started:
+                                installed = self._js_object(
+                                    self._frame_js(
+                                        helper_tab_id,
+                                        frame_id,
+                                        CAPTURE_JS,
+                                        timeout=self._remaining(deadline),
+                                    )
+                                )
+                                if installed.get("ok") is True:
+                                    triggered = self._js_object(
+                                        self._frame_js(
+                                            helper_tab_id,
+                                            frame_id,
+                                            TRIGGER_JS,
+                                            timeout=self._remaining(deadline),
+                                        )
+                                    )
+                                    capture_started = triggered.get("ok") is True
+                            if capture_started:
+                                value = self._js_value(
+                                    self._frame_js(
+                                        helper_tab_id,
+                                        frame_id,
+                                        READ_CAPTURE_JS,
+                                        timeout=self._remaining(deadline),
+                                    )
+                                )
+                                if (
+                                    isinstance(value, str)
+                                    and value.startswith("Bearer ")
+                                    and len(value) > 107
+                                ):
+                                    return OwaSession.from_vimbrowser_bearer(
+                                        value[7:],
+                                        mailbox=mailbox,
+                                        source=f"vimbrowser-context:{self.context}",
+                                    )
+                        except BrowserImportError:
+                            # The mailbox shell can become visible before its
+                            # folder tree or request pipeline is ready. Retry
+                            # within the same bounded authentication deadline.
+                            capture_started = False
                 self.sleeper(min(POLL_SECONDS, max(0.0, deadline - self.clock())))
         finally:
             if helper_tab_id is not None:
