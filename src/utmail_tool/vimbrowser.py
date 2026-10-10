@@ -147,6 +147,19 @@ class BrowserTab:
     context: str | None = None
 
 
+def run_vimbrowser(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    """Run exact-frame probes through the current stdin-based CLI.
+
+    Probe source contains no credential values. Results may contain tokens and
+    must remain captured inside this tool, never printed in diagnostics.
+    """
+    if command[1:2] == ["frame-js"]:
+        script = kwargs.get("input")
+        if not isinstance(script, str) or not script:
+            raise BrowserImportError("frame probe requires script input")
+    return subprocess.run(command, **kwargs)
+
+
 class VimbrowserDelegate:
     """Bounded, exact-tab vimbrowser-cli access shared by auth flows."""
 
@@ -154,7 +167,7 @@ class VimbrowserDelegate:
         self,
         *,
         executable: str | None = None,
-        runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        runner: Callable[..., subprocess.CompletedProcess[str]] = run_vimbrowser,
         clock: Callable[[], float] = time.time,
         sleeper: Callable[[float], None] = time.sleep,
     ):
@@ -466,6 +479,13 @@ class VimbrowserAuthenticator(VimbrowserDelegate):
                 ),
                 "open-context",
             )
+            # Current IPC returns a compact status with tabs as a count.
+            # Fetch the full list, still validating exactly one new ID/context.
+            if not isinstance(opened.get("tabs"), list):
+                opened = self._json(
+                    self._run("tabs", "--json", timeout=self._remaining(deadline)),
+                    "tabs",
+                )
             helper_tab = self._new_context_tab(opened, before_ids=before_ids)
             helper_tab_id = helper_tab.id
             if interactive:

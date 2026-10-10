@@ -94,6 +94,22 @@ class AuthRunner:
 
 
 class VimbrowserAuthenticatorTests(unittest.TestCase):
+    def test_compact_open_response_fetches_exact_context_tab(self):
+        class CompactRunner(AuthRunner):
+            def __call__(self, command, **kwargs):
+                result = super().__call__(command, **kwargs)
+                if command[1:2] == ["open-context"]:
+                    result.stdout = json.dumps({"tabs": 2, "active_tabid": 9})
+                return result
+
+        runner = CompactRunner()
+        auth = VimbrowserAuthenticator(context="utmail-helper", runner=runner)
+        session = auth.acquire(mailbox="student@example.edu", interactive=True)
+        self.assertEqual(session.source, "vimbrowser-context:utmail-helper")
+        self.assertEqual(session.access_token, runner.access)
+        commands = [call[0][1:] for call in runner.calls]
+        self.assertEqual(commands[-2:], [["close-tab", "9"], ["focus", "4"]])
+
     def test_persistent_auth_uses_only_new_exact_context_tab_then_restores_focus(self):
         runner = AuthRunner()
         auth = VimbrowserAuthenticator(
