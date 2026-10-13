@@ -161,6 +161,16 @@ The client has no generic API escape hatch. Redirects are disabled, pagination U
 
 Authentication renewal performs a fixed form-encoded `POST` to the Microsoft tenant token endpoint using Outlook Web's first-party client and `https://outlook.office.com/.default`. The named vimbrowser context may also load Microsoft, U of T SSO, and Outlook pages during reauthentication.
 
+## Exocortex new-mail notifications
+
+`utmail notify` runs a read-only poller that publishes one Exocortex external notification (tool `utmail`, source `inbox`) per newly arrived Inbox message, with structured `event.data` for subscriber-side filtering, plus one deduplicated `auth_needed` event when human sign-in is required. See [NOTIFY.md](NOTIFY.md) for the event schema, cursor semantics, and supervision.
+
+```text
+utmail notify start|stop|status|list|preview|run
+utmail notify subscribe CONV [--delivery wake|inbox]
+utmail notify unsubscribe CONV
+```
+
 ## Local state
 
 Defaults:

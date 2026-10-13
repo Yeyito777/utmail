@@ -38,6 +38,7 @@
 - Downloads are regular files with mode `0600`, reject symlink directories, refuse overwrite without `--force`, and have a fixed size ceiling.
 - Inbox/search summaries omit bodies. Only explicit `show` and `thread` commands retrieve message bodies. Their optional link extraction and compact-body processing are local transformations; extracted links, including decoded Outlook SafeLink destinations, are never fetched or followed.
 - This design does not protect against malware or another process already running as the mailbox owner's Unix user.
+- The optional `utmail notify` poller uses the same GET-only `OwaClient` (Inbox list, Internet headers, attachment metadata only) and renewal path as scans; it never marks, moves, or deletes mail and never attempts interactive login. Its cursor/pending-event state (message IDs, timestamps, and for undelivered events the summary fields) is stored mode 0600 in `notify-state.json` beside the session, and events are published only to the local Exocortex socket.
 
 ## Support and revocation limits
 
