@@ -1,0 +1,16 @@
+{
+  "name": "utmail",
+  "bin": "./utmail",
+  "systemHint": "",
+  "display": {
+    "label": "UTmail",
+    "color": "#0078d4"
+  },
+  "daemon": {
+    "command": "./utmail notify run",
+    "restart": "on-failure",
+    "env": {
+      "UTMAIL_NOTIFY_POLL_SECONDS": "60"
+    }
+  }
+}

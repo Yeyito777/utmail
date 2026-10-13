@@ -32,3 +32,6 @@ downloads/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Exocortex-supervised daemon log and PID (written when installed as an external tool)
+config/
