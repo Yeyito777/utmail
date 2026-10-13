@@ -460,6 +460,7 @@ class VimbrowserAuthenticator(VimbrowserDelegate):
         mailbox: str = DEFAULT_MAILBOX,
         interactive: bool,
         timeout_seconds: float | None = None,
+        assistant: Any = None,
     ) -> OwaSession:
         timeout = timeout_seconds if timeout_seconds is not None else (600.0 if interactive else 75.0)
         if timeout <= 0 or timeout > 1800:
@@ -502,6 +503,10 @@ class VimbrowserAuthenticator(VimbrowserDelegate):
                 tab = matches[0]
                 if tab.context != self.context:
                     raise BrowserImportError("the helper-opened tab changed browser context")
+                if assistant is not None:
+                    # Unattended re-login (autologin.py): fill U of T weblogin
+                    # and approve our own Duo push in this exact helper tab.
+                    assistant.step(helper_tab_id, tab.url)
                 if self._is_outlook_url(tab.url):
                     frame_id: str | None = None
                     try:

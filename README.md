@@ -75,7 +75,11 @@ Normal commands then:
 1. use the current OWA access token while valid;
 2. rotate it through Microsoft's fixed token endpoint when needed;
 3. open a transient Outlook tab in the same named vimbrowser context after the browser-SPA refresh window ends;
-4. request another interactive login only when Microsoft or U of T requires human reauthentication.
+4. when U of T requires weblogin + Duo again, try one unattended re-login (below), and only then request an interactive login.
+
+### Automatic re-login
+
+If step 3 lands on U of T weblogin, `utmail` (at most once per 30 minutes) reopens the helper tab focused, fills `#username`/`#password` from the `UOFT_UTORID`/`UOFT_UTORID_PASSWORD` secrets via `secrets run`, reads the Verified Push code from that tab's Duo page (switching to the "Exocortex local" device if needed), and asks `duo own-login approve` to approve the one matching request. duo-cli enforces the login lock, a 6-per-day cap, request matching, and an audit log; see its SECURITY.md. On any failure the command exits 3 as before, with the reason appended. Disable with `UTMAIL_AUTOLOGIN=0`.
 
 Renewal is best-effort, not literally permanent. Password changes, explicit revocation, Conditional Access, MFA policy, inactivity, or upstream changes can end a session.
 
