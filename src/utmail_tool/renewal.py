@@ -8,6 +8,7 @@ from typing import Callable
 
 import requests
 
+from . import autologin
 from .errors import NetworkError, SessionRejectedError, SessionRequiredError
 from .paths import lock_path, session_path
 from .session import OWA_APP_ID, OwaSession
@@ -88,6 +89,7 @@ def load_or_refresh_session(
     lock: Path | None = None,
     direct_refresher: Callable[[OwaSession], OwaSession] = refresh_direct,
     browser_authenticator: VimbrowserAuthenticator | None = None,
+    auto_login: Callable[..., OwaSession] | None = None,
 ) -> OwaSession:
     target = path or session_path()
     lock_target = lock or lock_path()
@@ -119,7 +121,20 @@ def load_or_refresh_session(
                     "the imported OWA token expired; run `utmail login --persistent` for automatic renewal"
                 )
             authenticator = browser_authenticator or VimbrowserAuthenticator()
-            renewed = authenticator.acquire(mailbox=session.mailbox, interactive=False)
+            try:
+                renewed = authenticator.acquire(mailbox=session.mailbox, interactive=False)
+            except SessionRequiredError as error:
+                # U of T wants weblogin + Duo again: try one unattended login in
+                # the same context (rate-limited, duo-capped), else raise as before.
+                renewed = (auto_login or autologin.attempt)(
+                    lambda assistant: authenticator.acquire(
+                        mailbox=session.mailbox,
+                        interactive=True,
+                        timeout_seconds=autologin.LOGIN_TIMEOUT_SECONDS,
+                        assistant=assistant,
+                    ),
+                    error,
+                )
             if renewed.tenant_id != session.tenant_id or renewed.object_id != session.object_id:
                 raise SessionRejectedError("the named vimbrowser context authenticated a different account")
 
