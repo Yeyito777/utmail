@@ -46,10 +46,13 @@ READ_CREDENTIALS_PY = (
     "json.dump([os.environ['UOFT_UTORID'], os.environ['UOFT_UTORID_PASSWORD']], sys.stdout)"
 )
 
+# `pending` marks the document we already submitted: until its POST navigates
+# away, the old form is still on screen and must not read as a rejection.
 WEBLOGIN_PROBE_JS = r"""
 (() => JSON.stringify({form: location.origin === 'https://idpz.utorauth.utoronto.ca' &&
   !!document.getElementById('username') && !!document.getElementById('password') &&
-  !!document.getElementById('login-btn')}))()
+  !!document.getElementById('login-btn'),
+  pending: document.documentElement.hasAttribute('data-exo-submitted')}))()
 """.strip()
 
 # __UTORID__/__PASSWORD__ are replaced with JSON string literals; the script is
@@ -64,6 +67,7 @@ WEBLOGIN_FILL_JS = r"""
     el.dispatchEvent(new Event('input', {bubbles: true}));
     el.dispatchEvent(new Event('change', {bubbles: true})); };
   set(u, __UTORID__); set(p, __PASSWORD__);
+  document.documentElement.setAttribute('data-exo-submitted', '');
   setTimeout(() => b.click(), 50);
   return JSON.stringify({ok: true});
 })()
@@ -241,7 +245,8 @@ class Assistant:
         if parts.scheme != "https" or parts.port not in (None, 443):
             return
         if host == WEBLOGIN_HOST:
-            if not self._js(tab_id, WEBLOGIN_PROBE_JS).get("form"):
+            probe = self._js(tab_id, WEBLOGIN_PROBE_JS)
+            if not probe.get("form") or probe.get("pending"):
                 return
             if self.submitted:
                 # Never retry a password: a second form means it was rejected.
