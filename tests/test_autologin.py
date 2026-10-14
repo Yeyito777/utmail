@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
 import tempfile
 import time
@@ -25,8 +27,17 @@ SECRET = "hunter2-Password"
 class FakeRunner:
     """Scripted vimbrowser/duo/secrets; records every argv, stdin and env."""
 
-    def __init__(self, *, pages: list[dict] | None = None, url: str = WEBLOGIN, duo_exit: int = 0, begin_exit: int = 0):
+    def __init__(
+        self,
+        *,
+        pages: list[dict] | None = None,
+        forms: list[dict] | None = None,
+        url: str = WEBLOGIN,
+        duo_exit: int = 0,
+        begin_exit: int = 0,
+    ):
         self.pages = list(pages or [])
+        self.forms = list(forms or [])
         self.url = url
         self.duo_exit = duo_exit
         self.begin_exit = begin_exit
@@ -53,7 +64,7 @@ class FakeRunner:
             if "trust-browser-button')" in input and "codes:" in input:
                 result = self.pages.pop(0) if self.pages else {"ok": True, "codes": []}
             elif "form:" in input:
-                result = {"form": True}
+                result = self.forms.pop(0) if self.forms else {"form": True}
             else:
                 result = {"ok": True}
             out = json.dumps({"result": json.dumps(result)})
@@ -79,6 +90,18 @@ class AssistantTests(unittest.TestCase):
         # The form showing again means the password was rejected: never retry.
         with self.assertRaisesRegex(SessionRequiredError, "did not accept"):
             helper.step(7)
+
+    def test_old_form_while_the_submit_is_in_flight_is_not_a_rejection(self) -> None:
+        # Oct 14: the poll after submit still saw the old form while its POST was loading.
+        runner = FakeRunner(forms=[{"form": True}, {"form": True, "pending": True}, {"form": True}])
+        helper = self.assistant(runner)
+        helper.step(7)
+        fill = next(s for s in runner.scripts if "b.click()" in s)
+        self.assertLess(fill.index("data-exo-submitted"), fill.index("b.click()"))
+        helper.step(7)  # same document, still submitting: wait
+        self.assertEqual(sum("b.click()" in s for s in runner.scripts), 1)
+        with self.assertRaisesRegex(SessionRequiredError, "did not accept"):
+            helper.step(7)  # a fresh form after the submit means it was rejected
 
     def test_duo_code_on_our_device_is_approved_once_with_code_on_stdin(self) -> None:
         runner = FakeRunner(url=DUO, pages=[
@@ -162,6 +185,17 @@ class AttemptTests(unittest.TestCase):
         with self.assertRaisesRegex(SessionRequiredError, "needs human; automatic re-login failed: timed out"):
             self.run_attempt(runner, login)
         self.assertEqual(runner.calls[-1][0][-1], "failed")
+
+    def test_termination_mid_login_still_ends_the_ticket(self) -> None:
+        # A caller's `timeout` sends SIGTERM; the ticket must still be released.
+        runner = FakeRunner()
+        previous = signal.getsignal(signal.SIGTERM)
+        try:
+            with self.assertRaises(SystemExit):
+                self.run_attempt(runner, lambda _helper: os.kill(os.getpid(), signal.SIGTERM))
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+        self.assertEqual(runner.calls[-1][0], ["duo", "own-login", "end", "a" * 32, "--outcome", "failed"])
 
     def test_rate_limit_and_begin_refusal_skip_the_browser(self) -> None:
         refused = FakeRunner(begin_exit=1)
