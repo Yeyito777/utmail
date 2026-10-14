@@ -27,8 +27,17 @@ SECRET = "hunter2-Password"
 class FakeRunner:
     """Scripted vimbrowser/duo/secrets; records every argv, stdin and env."""
 
-    def __init__(self, *, pages: list[dict] | None = None, url: str = WEBLOGIN, duo_exit: int = 0, begin_exit: int = 0):
+    def __init__(
+        self,
+        *,
+        pages: list[dict] | None = None,
+        forms: list[dict] | None = None,
+        url: str = WEBLOGIN,
+        duo_exit: int = 0,
+        begin_exit: int = 0,
+    ):
         self.pages = list(pages or [])
+        self.forms = list(forms or [])
         self.url = url
         self.duo_exit = duo_exit
         self.begin_exit = begin_exit
@@ -55,7 +64,7 @@ class FakeRunner:
             if "trust-browser-button')" in input and "codes:" in input:
                 result = self.pages.pop(0) if self.pages else {"ok": True, "codes": []}
             elif "form:" in input:
-                result = {"form": True}
+                result = self.forms.pop(0) if self.forms else {"form": True}
             else:
                 result = {"ok": True}
             out = json.dumps({"result": json.dumps(result)})
@@ -81,6 +90,18 @@ class AssistantTests(unittest.TestCase):
         # The form showing again means the password was rejected: never retry.
         with self.assertRaisesRegex(SessionRequiredError, "did not accept"):
             helper.step(7)
+
+    def test_old_form_while_the_submit_is_in_flight_is_not_a_rejection(self) -> None:
+        # Oct 14: the poll after submit still saw the old form while its POST was loading.
+        runner = FakeRunner(forms=[{"form": True}, {"form": True, "pending": True}, {"form": True}])
+        helper = self.assistant(runner)
+        helper.step(7)
+        fill = next(s for s in runner.scripts if "b.click()" in s)
+        self.assertLess(fill.index("data-exo-submitted"), fill.index("b.click()"))
+        helper.step(7)  # same document, still submitting: wait
+        self.assertEqual(sum("b.click()" in s for s in runner.scripts), 1)
+        with self.assertRaisesRegex(SessionRequiredError, "did not accept"):
+            helper.step(7)  # a fresh form after the submit means it was rejected
 
     def test_duo_code_on_our_device_is_approved_once_with_code_on_stdin(self) -> None:
         runner = FakeRunner(url=DUO, pages=[
