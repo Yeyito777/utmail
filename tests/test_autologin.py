@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
 import tempfile
 import time
@@ -162,6 +164,17 @@ class AttemptTests(unittest.TestCase):
         with self.assertRaisesRegex(SessionRequiredError, "needs human; automatic re-login failed: timed out"):
             self.run_attempt(runner, login)
         self.assertEqual(runner.calls[-1][0][-1], "failed")
+
+    def test_termination_mid_login_still_ends_the_ticket(self) -> None:
+        # A caller's `timeout` sends SIGTERM; the ticket must still be released.
+        runner = FakeRunner()
+        previous = signal.getsignal(signal.SIGTERM)
+        try:
+            with self.assertRaises(SystemExit):
+                self.run_attempt(runner, lambda _helper: os.kill(os.getpid(), signal.SIGTERM))
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+        self.assertEqual(runner.calls[-1][0], ["duo", "own-login", "end", "a" * 32, "--outcome", "failed"])
 
     def test_rate_limit_and_begin_refusal_skip_the_browser(self) -> None:
         refused = FakeRunner(begin_exit=1)

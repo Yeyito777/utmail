@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
+from . import autologin
 from .errors import BrowserImportError, SessionRequiredError
 from .paths import vimbrowser_cli, vimbrowser_context
 from .session import DEFAULT_MAILBOX, OWA_APP_ID, OwaSession
@@ -18,6 +19,9 @@ OUTLOOK_URL = "https://outlook.cloud.microsoft/mail/"
 MAX_CLI_OUTPUT_BYTES = 512 * 1024
 COMMAND_TIMEOUT_SECONDS = 20.0
 POLL_SECONDS = 0.5
+# Silent renewal stops once its tab has rested this many polls on weblogin/Duo:
+# only a human or the auto-login can continue from there.
+SIGN_IN_SETTLE_POLLS = 10
 CONTEXT_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
 
 
@@ -462,6 +466,23 @@ class VimbrowserAuthenticator(VimbrowserDelegate):
         timeout_seconds: float | None = None,
         assistant: Any = None,
     ) -> OwaSession:
+        # A caller's `timeout` must still close the tab (see autologin.terminable).
+        with autologin.terminable():
+            return self._acquire(
+                mailbox=mailbox,
+                interactive=interactive,
+                timeout_seconds=timeout_seconds,
+                assistant=assistant,
+            )
+
+    def _acquire(
+        self,
+        *,
+        mailbox: str,
+        interactive: bool,
+        timeout_seconds: float | None,
+        assistant: Any,
+    ) -> OwaSession:
         timeout = timeout_seconds if timeout_seconds is not None else (600.0 if interactive else 75.0)
         if timeout <= 0 or timeout > 1800:
             raise BrowserImportError("the vimbrowser authentication timeout is outside the safety bounds")
@@ -495,6 +516,7 @@ class VimbrowserAuthenticator(VimbrowserDelegate):
                 # focus only this verified helper tab and restore focus below.
                 self._run("focus", str(helper_tab_id), timeout=self._remaining(deadline))
 
+            settled = 0
             while self.clock() < deadline:
                 _, tabs = self.tabs(timeout=self._remaining(deadline))
                 matches = [tab for tab in tabs if tab.id == helper_tab_id]
@@ -507,6 +529,12 @@ class VimbrowserAuthenticator(VimbrowserDelegate):
                     # Unattended re-login (autologin.py): fill U of T weblogin
                     # and approve our own Duo push in this exact helper tab.
                     assistant.step(helper_tab_id, tab.url)
+                elif not interactive:
+                    # Don't burn the whole silent budget on a login page; callers
+                    # run under short `timeout`s and the auto-login needs the time.
+                    settled = settled + 1 if autologin.is_sign_in_url(tab.url) else 0
+                    if settled >= SIGN_IN_SETTLE_POLLS:
+                        break
                 if self._is_outlook_url(tab.url):
                     frame_id: str | None = None
                     try:

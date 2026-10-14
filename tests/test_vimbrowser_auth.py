@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
 import time
 import unittest
@@ -11,6 +13,7 @@ from utmail_tool.session import OWA_APP_ID
 from utmail_tool.vimbrowser import (
     CAPTURE_JS,
     READ_CAPTURE_JS,
+    SIGN_IN_SETTLE_POLLS,
     TOKEN_DISCOVERY_JS,
     TRIGGER_JS,
     VimbrowserAuthenticator,
@@ -156,6 +159,36 @@ class VimbrowserAuthenticatorTests(unittest.TestCase):
         commands = [call[0][1:] for call in runner.calls]
         self.assertEqual(commands[-2:], [["close-tab", "9"], ["focus", "4"]])
         self.assertFalse(any(command[:1] == ["frame-tree"] for command in commands))
+
+    def test_silent_renewal_stops_early_once_resting_on_weblogin(self):
+        clock = FakeClock()
+        runner = AuthRunner(page_url="https://idpz.utorauth.utoronto.ca/idp/profile/SAML2/Redirect/SSO?execution=e1s1")
+        auth = VimbrowserAuthenticator(context="utmail-helper", runner=runner, clock=clock, sleeper=clock.sleep)
+        with self.assertRaisesRegex(SessionRequiredError, "utmail login --persistent"):
+            auth.acquire(mailbox="student@example.edu", interactive=False)
+        commands = [call[0][1:] for call in runner.calls]
+        self.assertEqual(commands[-2:], [["close-tab", "9"], ["focus", "4"]])
+        self.assertLess(clock.value - 1000.0, SIGN_IN_SETTLE_POLLS)  # well inside the 75 s budget
+
+    def test_termination_signal_still_closes_the_helper_tab(self):
+        class TerminatedRunner(AuthRunner):
+            def __call__(self, command, **kwargs):
+                result = super().__call__(command, **kwargs)
+                if sum(call[0][1:] == ["tabs", "--json"] for call in self.calls) == 3:
+                    os.kill(os.getpid(), signal.SIGTERM)  # a caller's `timeout` firing mid-poll
+                return result
+
+        runner = TerminatedRunner(page_url="https://login.microsoftonline.com/common/oauth2/authorize")
+        auth = VimbrowserAuthenticator(context="utmail-helper", runner=runner)
+        previous = signal.getsignal(signal.SIGTERM)
+        try:
+            with self.assertRaises(SystemExit) as raised:
+                auth.acquire(mailbox="student@example.edu", interactive=False)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+        self.assertEqual(raised.exception.code, 128 + signal.SIGTERM)
+        commands = [call[0][1:] for call in runner.calls]
+        self.assertEqual(commands[-2:], [["close-tab", "9"], ["focus", "4"]])
 
     def test_opaque_outlook_cache_falls_back_to_context_renewable_bearer_capture(self):
         class OpaqueCacheRunner(AuthRunner):

@@ -15,11 +15,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Iterator, TypeVar
 from urllib.parse import urlsplit
 
 from .errors import SessionRequiredError, UtmailError
@@ -110,6 +113,49 @@ DUO_ACTION_JS = r"""
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 T = TypeVar("T")
+
+
+def is_sign_in_url(url: str) -> bool:
+    """True for U of T weblogin and Duo pages, where only a human (or Assistant) can proceed."""
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return False
+    host = parts.hostname or ""
+    return parts.scheme == "https" and port in (None, 443) and (host == WEBLOGIN_HOST or bool(DUO_HOST_RE.fullmatch(host)))
+
+
+@contextmanager
+def terminable() -> Iterator[None]:
+    """Turn SIGTERM/SIGHUP into SystemExit so ``finally`` cleanup still runs.
+
+    Callers often wrap commands in ``timeout``. Python's default SIGTERM kills
+    the process outright, leaving the helper tab open and the own-login ticket
+    unreleased. The first signal raises; later ones are ignored so cleanup
+    finishes. Outside the main thread this is a no-op.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous: dict[int, Any] = {}
+    fired = False
+
+    def handler(signum: int, _frame: Any) -> None:
+        nonlocal fired
+        fired = True
+        for number in previous:
+            signal.signal(number, signal.SIG_IGN)
+        raise SystemExit(128 + signum)
+
+    for number in (signal.SIGTERM, signal.SIGHUP):
+        previous[number] = signal.signal(number, handler)
+    try:
+        yield
+    finally:
+        if not fired:
+            for number, old in previous.items():
+                signal.signal(number, signal.SIG_DFL if old is None else old)
 
 
 class _Transient(Exception):
@@ -315,7 +361,11 @@ def attempt(
     if clock() - last < MIN_INTERVAL_SECONDS:
         raise give_up("skipped (last attempt under 30 minutes ago)")
     atomic_write_json(target, {"lastAttemptAt": clock()})
+    with terminable():
+        return _attempt(login, runner, give_up)
 
+
+def _attempt(login: Callable[[Assistant], T], runner: Runner, give_up: Callable[[str], SessionRequiredError]) -> T:
     begun = _duo(runner, "begin", "--caller", TOOL, "--json")
     try:
         ticket = json.loads(begun.stdout)["ownLogin"]["ticket"] if begun and begun.returncode == 0 else None
