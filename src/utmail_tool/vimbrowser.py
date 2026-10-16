@@ -631,7 +631,9 @@ class VimbrowserAuthenticator(VimbrowserDelegate):
                     self._run("close-tab", str(helper_tab_id))
                 except BrowserImportError:
                     pass
-            if original_active is not None and original_active != helper_tab_id:
+            # Silent renewal opened a background tab and never took focus.
+            # Do not override a user's newer selection during cleanup.
+            if interactive and original_active is not None and original_active != helper_tab_id:
                 try:
                     self._run("focus", str(original_active))
                 except BrowserImportError:
