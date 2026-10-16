@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+uoft="${UOFT_ROOT:-$HOME/Desktop/uoft}"
+export UTMAIL_MAILBOX="${UTMAIL_MAILBOX:-yeyito.linerobarcenas@mail.utoronto.ca}"
+export UTMAIL_SESSION_FILE="${UTMAIL_SESSION_FILE:-$uoft/.private/utmail/session.json}"
+export UTMAIL_SESSION_LOCK_FILE="${UTMAIL_SESSION_LOCK_FILE:-$uoft/.private/utmail/session.lock}"
+export UTMAIL_VIMBROWSER_CONTEXT="${UTMAIL_VIMBROWSER_CONTEXT:-uoft-mac-mail}"
+export UTMAIL_VIMBROWSER_CLI="${UTMAIL_VIMBROWSER_CLI:-vimbrowser-cli}"
+exec "$root/utmail" "$@"

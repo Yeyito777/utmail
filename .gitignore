@@ -32,3 +32,5 @@ downloads/
 .vscode/
 .DS_Store
 Thumbs.db
+config/*
+!config/.gitkeep
