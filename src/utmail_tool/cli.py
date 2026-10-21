@@ -313,6 +313,8 @@ def parser() -> argparse.ArgumentParser:
     whoami = commands.add_parser("whoami", help="show the authenticated mailbox account")
     add_json(whoami)
     whoami.set_defaults(func=command_whoami)
+    # Dispatched before argparse in main(); listed here for --help discovery.
+    commands.add_parser("notify", help="publish new Inbox mail as Exocortex notifications (see `utmail notify -h`)")
 
     inbox = commands.add_parser("inbox", help="list Inbox message summaries")
     inbox.add_argument("--limit", "-n", type=int, default=20)
@@ -355,6 +357,10 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    if sys.argv[1:2] == ["notify"]:
+        from .notify import main as notify_main
+
+        raise SystemExit(notify_main(sys.argv[2:]))
     args = parser().parse_args()
     as_json = bool(getattr(args, "json", False))
     try:

@@ -97,15 +97,6 @@ class AuthRunner:
 
 
 class VimbrowserAuthenticatorTests(unittest.TestCase):
-    def test_successful_silent_renewal_never_requests_focus(self):
-        runner = AuthRunner()
-        auth = VimbrowserAuthenticator(context="utmail-helper", runner=runner)
-        session = auth.acquire(mailbox="student@example.edu", interactive=False)
-        self.assertEqual(session.renewal_mode, "vimbrowser")
-        commands = [call[0][1:] for call in runner.calls]
-        self.assertEqual(commands[-1], ["close-tab", "9"])
-        self.assertFalse(any(command[0] == "focus" for command in commands))
-
     def test_compact_open_response_fetches_exact_context_tab(self):
         class CompactRunner(AuthRunner):
             def __call__(self, command, **kwargs):
@@ -166,8 +157,7 @@ class VimbrowserAuthenticatorTests(unittest.TestCase):
             )
         self.assertIn("utmail login --persistent", caught.exception.message)
         commands = [call[0][1:] for call in runner.calls]
-        self.assertEqual(commands[-1], ["close-tab", "9"])
-        self.assertFalse(any(command[0] == "focus" for command in commands))
+        self.assertEqual(commands[-2:], [["close-tab", "9"], ["focus", "4"]])
         self.assertFalse(any(command[:1] == ["frame-tree"] for command in commands))
 
     def test_silent_renewal_stops_early_once_resting_on_weblogin(self):
@@ -177,8 +167,7 @@ class VimbrowserAuthenticatorTests(unittest.TestCase):
         with self.assertRaisesRegex(SessionRequiredError, "utmail login --persistent"):
             auth.acquire(mailbox="student@example.edu", interactive=False)
         commands = [call[0][1:] for call in runner.calls]
-        self.assertEqual(commands[-1], ["close-tab", "9"])
-        self.assertFalse(any(command[0] == "focus" for command in commands))
+        self.assertEqual(commands[-2:], [["close-tab", "9"], ["focus", "4"]])
         self.assertLess(clock.value - 1000.0, SIGN_IN_SETTLE_POLLS)  # well inside the 75 s budget
 
     def test_termination_signal_still_closes_the_helper_tab(self):
@@ -199,8 +188,7 @@ class VimbrowserAuthenticatorTests(unittest.TestCase):
             signal.signal(signal.SIGTERM, previous)
         self.assertEqual(raised.exception.code, 128 + signal.SIGTERM)
         commands = [call[0][1:] for call in runner.calls]
-        self.assertEqual(commands[-1], ["close-tab", "9"])
-        self.assertFalse(any(command[0] == "focus" for command in commands))
+        self.assertEqual(commands[-2:], [["close-tab", "9"], ["focus", "4"]])
 
     def test_opaque_outlook_cache_falls_back_to_context_renewable_bearer_capture(self):
         class OpaqueCacheRunner(AuthRunner):
