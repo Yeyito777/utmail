@@ -1,7 +1,7 @@
 {
   "name": "utmail",
   "bin": "./utmail",
-  "systemHint": "",
+  "systemHint": "You have read-only UofT Outlook access through `utmail` (alias `uoftmail`, source at <exocortex-source-dir>/external-tools/utmail). Run `utmail -h`; prefer bounded reads and --json. Auth uses this machine's local vimbrowser. `utmail login --from-vimbrowser --tab ID` imports one exact signed-in Outlook tab; --persistent uses a separate renewable context. Never print bearer tokens/cookies. This tool cannot send/delete email. Per-machine state paths, and whether this machine runs the new-mail notifier, come from the tool's untracked config/local.env.",
   "display": {
     "label": "UTmail",
     "color": "#0078d4"

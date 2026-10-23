@@ -4,6 +4,23 @@ set -euo pipefail
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 python="$root/.venv/bin/python"
 
+# Per-machine settings (e.g. UTMAIL_SESSION_FILE on a second install) live in
+# the untracked config/local.env, a bash fragment. Absent, the defaults apply.
+if [[ -f "$root/config/local.env" ]]; then
+  set -a
+  # shellcheck source=/dev/null
+  source "$root/config/local.env"
+  set +a
+fi
+
+# manifest.json declares the notifier daemon for every external-tool install.
+# A machine that must not poll (one notifier per mailbox) sets
+# UTMAIL_NOTIFY_DAEMON=0; a clean exit is not restarted under on-failure.
+if [[ "${1:-}" == notify && "${2:-}" == run && "${UTMAIL_NOTIFY_DAEMON:-1}" == 0 ]]; then
+  printf 'utmail: notify daemon disabled on this machine (UTMAIL_NOTIFY_DAEMON=0)\n' >&2
+  exit 0
+fi
+
 if [[ ! -x "$python" ]]; then
   printf 'utmail: isolated environment is missing\n' >&2
   printf 'Run: uv sync --project %s\n' "$root" >&2
