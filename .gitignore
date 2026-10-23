@@ -33,5 +33,6 @@ downloads/
 .DS_Store
 Thumbs.db
 
-# Exocortex-supervised daemon log and PID (written when installed as an external tool)
+# Exocortex-supervised daemon log and PID (written when installed as an external
+# tool) and the per-machine config/local.env
 config/
