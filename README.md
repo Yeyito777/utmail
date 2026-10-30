@@ -81,6 +81,8 @@ Normal commands then:
 
 If step 3 lands on U of T weblogin, `utmail` (at most once per 30 minutes) reopens the helper tab focused, fills `#username`/`#password` from the `UOFT_UTORID`/`UOFT_UTORID_PASSWORD` secrets via `secrets run`, reads the Verified Push code from that tab's Duo page (switching to the "Exocortex local" device if needed), and asks `duo own-login approve` to approve the one matching request. duo-cli enforces the login lock, a 6-per-day cap, request matching, and an audit log; see its SECURITY.md. On any failure the command exits 3 as before, with the reason appended. Disable with `UTMAIL_AUTOLOGIN=0`.
 
+U of T's ADFS (`sts.ad.utoronto.ca`) keeps adding session-only cookies in a context that is never restarted. Eventually it answers HTTP 400 "Header Field Too Long". When a helper tab lands on an ADFS or weblogin page that shows this error or HTTP 400 (during renewal, automatic re-login or `login --persistent`), `utmail` deletes that one host's cookies in the helper context through the exact tab, reloads once and carries on. Before an automatic re-login, it also clears ADFS cookies once they pass 8 or include a `SamlSession3`+ chunk. Microsoft and Outlook cookies, which hold the renewable session, are never touched. Each clearing logs the host, count and cookie names (never values) to stderr.
+
 Renewal is best-effort, not literally permanent. Password changes, explicit revocation, Conditional Access, MFA policy, inactivity, or upstream changes can end a session.
 
 ### Short-lived compatibility imports

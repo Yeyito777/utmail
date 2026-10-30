@@ -11,12 +11,16 @@ from helpers import token
 from utmail_tool.errors import BrowserImportError, SessionRequiredError
 from utmail_tool.session import OWA_APP_ID
 from utmail_tool.vimbrowser import (
+    ADFS_URL,
     CAPTURE_JS,
+    OUTLOOK_URL,
     READ_CAPTURE_JS,
     SIGN_IN_SETTLE_POLLS,
+    SSO_ERROR_PROBE_JS,
     TOKEN_DISCOVERY_JS,
     TRIGGER_JS,
     VimbrowserAuthenticator,
+    adfs_overgrown,
 )
 
 
@@ -77,6 +81,9 @@ class AuthRunner:
             })
         elif args == ["frame-tree", "9"]:
             output = json.dumps({"ok": True, "tabid": 9, "main_frame_id": "main"})
+        elif args == ["frame-js", "9", "main"] and input == SSO_ERROR_PROBE_JS:
+            value = {"host": self.page_url.split("/")[2], "status": 200, "tooLong": False}
+            output = json.dumps({"ok": True, "tabid": 9, "result": json.dumps(value)})
         elif args == ["frame-js", "9", "main"]:
             if input != TOKEN_DISCOVERY_JS:
                 raise AssertionError("unexpected frame script")
@@ -94,6 +101,206 @@ class AuthRunner:
         else:
             raise AssertionError(f"unexpected command: {args}")
         return subprocess.CompletedProcess(command, 0, output, "")
+
+
+ADFS = "sts.ad.utoronto.ca"
+WEBLOGIN = "idpz.utorauth.utoronto.ca"
+ADFS_400_URL = "https://sts.ad.utoronto.ca/adfs/ls/?SAMLRequest=abc&RelayState=def"
+WEBLOGIN_URL = "https://idpz.utorauth.utoronto.ca/idp/profile/SAML2/Redirect/SSO?execution=e1s1"
+# The 16 cookies found in utmail-helper on Oct 30 2026.
+BLOATED_ADFS = [
+    "SamlSession", "SamlSession1", "SamlSession2", "SamlSession3", "SamlSession4", "SamlSession5",
+    "MSISContext0a1b", "MSISContext2c3d", "MSISAuthenticated", "MSISLoopDetectionCookie",
+    "MSISIPSelectionSession", "MSISSignOut", "SamlLogout", "ReturnUrl", "MSISAuthenticated2", "MSISAuth1",
+]
+
+
+class SsoBrowser:
+    """A fake vimbrowser with per-host cookies in the helper context.
+
+    A sign-in host answers HTTP 400 while it holds more than ``limit`` cookies;
+    ``reload`` past a healthy sign-in host lands on Outlook.
+    """
+
+    def __init__(self, url: str, cookies: dict[str, list[str]], *, limit: int = 8, heals: bool = True):
+        self.url = url
+        self.cookies = {host: list(names) for host, names in cookies.items()}
+        self.cookies.setdefault("login.microsoftonline.com", ["ESTSAUTHPERSISTENT", "SignInStateCookie"])
+        self.cookies.setdefault("outlook.cloud.microsoft", ["OpenIdConnect.token.v1"])
+        self.limit = limit
+        self.heals = heals
+        self.opened = False
+        self.calls: list[list[str]] = []
+        self.access = token(marker="vimbrowser-access")
+
+    def host(self, url: str | None = None) -> str:
+        return (url or self.url).split("/")[2]
+
+    def rejected(self) -> bool:
+        return self.host() in (ADFS, WEBLOGIN) and len(self.cookies.get(self.host(), [])) > self.limit
+
+    def __call__(self, command, *, input, text, capture_output, timeout, check):
+        args = command[1:]
+        self.calls.append(args)
+        if args == ["tabs", "--json"]:
+            tabs = [{"id": 4, "url": "https://example.com/", "active": True}]
+            if self.opened:
+                tabs.append({"id": 9, "url": self.url, "active": False, "loading": False, "context": "utmail-helper"})
+            value = {"active_tabid": 4, "tabs": tabs}
+        elif args == ["open-context", "utmail-helper", OUTLOOK_URL]:
+            self.opened = True
+            value = {"tabs": 2, "active_tabid": 4}
+        elif args == ["frame-tree", "9"]:
+            value = {"tabid": 9, "main_frame_id": "main"}
+        elif args == ["frame-js", "9", "main"] and input == SSO_ERROR_PROBE_JS:
+            rejected = self.rejected()
+            page = {"host": self.host(), "status": 400 if rejected else 200, "tooLong": rejected}
+            value = {"ok": True, "tabid": 9, "result": json.dumps(page)}
+        elif args == ["frame-js", "9", "main"] and input == TOKEN_DISCOVERY_JS:
+            if not self.url.startswith(OUTLOOK_URL):
+                page = {"ok": False, "reason": "origin"}
+            else:
+                page = {
+                    "ok": True,
+                    "accessToken": self.access,
+                    "refreshToken": "vimbrowser-refresh-" + "r" * 512,
+                    "refreshTokenExpiresAt": int(time.time()) + 86_400,
+                    "clientId": OWA_APP_ID,
+                    "accountId": "object-id.tenant-id",
+                }
+            value = {"ok": True, "tabid": 9, "result": json.dumps(page)}
+        elif args[:2] == ["cookies", "9"]:
+            host = self.host(args[2] if len(args) > 2 else None)
+            rows = [
+                {"name": name, "value": "secret-" + name, "domain": host, "path": "/adfs", "httponly": True}
+                for name in self.cookies.get(host, [])
+            ]
+            rows += [
+                {"name": name, "value": "secret-" + name, "domain": ".utoronto.ca", "path": "/"}
+                for name in self.cookies.get(".utoronto.ca", [])
+            ]
+            value = {"cookies": rows}
+        elif args[:2] == ["cookie-delete", "9"]:
+            names = self.cookies.get(self.host(), [])
+            value = {"deleted": names.count(args[2])}
+            self.cookies[self.host()] = [name for name in names if name != args[2]]
+        elif args[:2] == ["load", "9"]:
+            self.url = args[2]
+        elif args == ["reload", "9"]:
+            if self.heals and not self.rejected():
+                self.url = OUTLOOK_URL
+        elif args in (["focus", "9"], ["close-tab", "9"], ["focus", "4"]):
+            value = {}
+        else:
+            raise AssertionError(f"unexpected command: {args}")
+        if args[:1] in (["load"], ["reload"]):
+            value = {"ok": True}
+        return subprocess.CompletedProcess(command, 0, json.dumps(value), "")
+
+
+class RecordingAssistant:
+    def __init__(self):
+        self.urls: list[str] = []
+
+    def step(self, tab_id, url):
+        self.urls.append(url)
+
+
+class OversizedSsoCookieTests(unittest.TestCase):
+    def authenticator(self, browser, logs):
+        clock = FakeClock()
+        return VimbrowserAuthenticator(
+            context="utmail-helper", runner=browser, clock=clock, sleeper=clock.sleep, log=logs.append
+        )
+
+    def test_adfs_header_too_long_clears_only_adfs_cookies_reloads_once_and_finishes(self):
+        browser = SsoBrowser(ADFS_400_URL, {ADFS: BLOATED_ADFS})
+        logs: list[str] = []
+        session = self.authenticator(browser, logs).acquire(mailbox="student@example.edu", interactive=True)
+        self.assertEqual(session.access_token, browser.access)
+        deleted = [args[2] for args in browser.calls if args[:1] == ["cookie-delete"]]
+        self.assertEqual(deleted, BLOATED_ADFS)
+        self.assertEqual(browser.cookies[ADFS], [])
+        self.assertEqual(browser.cookies["login.microsoftonline.com"], ["ESTSAUTHPERSISTENT", "SignInStateCookie"])
+        self.assertEqual(browser.cookies["outlook.cloud.microsoft"], ["OpenIdConnect.token.v1"])
+        self.assertEqual(sum(args == ["reload", "9"] for args in browser.calls), 1)
+        self.assertEqual(len(logs), 1)
+        self.assertIn("Header Field Too Long", logs[0])
+        self.assertIn(f"cleared 16 {ADFS} cookies", logs[0])
+        self.assertIn("SamlSession5", logs[0])
+        self.assertNotIn("secret-", logs[0])
+
+    def test_recovery_runs_once_per_host_and_then_times_out_normally(self):
+        browser = SsoBrowser(ADFS_400_URL, {ADFS: BLOATED_ADFS}, heals=False)
+        browser.limit = -1  # Still rejected after clearing.
+        logs: list[str] = []
+        with self.assertRaisesRegex(SessionRequiredError, "utmail login --persistent"):
+            self.authenticator(browser, logs).acquire(
+                mailbox="student@example.edu", interactive=False, timeout_seconds=5.0
+            )
+        self.assertEqual(sum(args == ["reload", "9"] for args in browser.calls), 1)
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(browser.calls[-1], ["close-tab", "9"])
+
+    def test_weblogin_400_clears_only_weblogin_cookies(self):
+        weblogin = [f"cookie{index}" for index in range(10)]
+        browser = SsoBrowser(WEBLOGIN_URL, {WEBLOGIN: weblogin, ADFS: ["SamlSession", "MSISAuthenticated"]})
+        logs: list[str] = []
+        self.authenticator(browser, logs).acquire(mailbox="student@example.edu", interactive=True)
+        self.assertEqual([args[2] for args in browser.calls if args[:1] == ["cookie-delete"]], weblogin)
+        self.assertEqual(browser.cookies[ADFS], ["SamlSession", "MSISAuthenticated"])
+        self.assertIn(f"cleared 10 {WEBLOGIN} cookies", logs[0])
+
+    def test_healthy_sign_in_page_is_left_alone(self):
+        browser = SsoBrowser(ADFS_400_URL, {ADFS: ["SamlSession", "MSISAuthenticated"]})
+        logs: list[str] = []
+        with self.assertRaises(SessionRequiredError):
+            self.authenticator(browser, logs).acquire(
+                mailbox="student@example.edu", interactive=False, timeout_seconds=3.0
+            )
+        self.assertFalse(any(args[:1] in (["cookie-delete"], ["reload"]) for args in browser.calls))
+        self.assertEqual(logs, [])
+
+    def test_names_shared_with_other_domains_or_unsafe_are_never_deleted(self):
+        browser = SsoBrowser(ADFS_400_URL, {ADFS: [*BLOATED_ADFS, "bad name"], ".utoronto.ca": ["ReturnUrl"]})
+        logs: list[str] = []
+        self.authenticator(browser, logs).acquire(mailbox="student@example.edu", interactive=True)
+        deleted = [args[2] for args in browser.calls if args[:1] == ["cookie-delete"]]
+        self.assertNotIn("ReturnUrl", deleted)
+        self.assertNotIn("bad name", deleted)
+        self.assertEqual(len(deleted), 15)
+
+    def test_autologin_prunes_overgrown_adfs_cookies_before_signing_in(self):
+        browser = SsoBrowser(OUTLOOK_URL, {ADFS: ["SamlSession", "SamlSession1", "SamlSession2", "SamlSession3"]})
+        logs: list[str] = []
+        assistant = RecordingAssistant()
+        self.authenticator(browser, logs).acquire(
+            mailbox="student@example.edu", interactive=True, timeout_seconds=150.0, assistant=assistant
+        )
+        loads = [args[2] for args in browser.calls if args[:1] == ["load"]]
+        self.assertEqual(loads, [ADFS_URL, OUTLOOK_URL])
+        self.assertEqual(browser.cookies[ADFS], [])
+        self.assertIn(["cookies", "9", ADFS_URL], browser.calls)
+        self.assertIn("before automatic re-login", logs[0])
+        self.assertEqual(assistant.urls, [OUTLOOK_URL])
+        self.assertEqual(browser.cookies["login.microsoftonline.com"], ["ESTSAUTHPERSISTENT", "SignInStateCookie"])
+
+    def test_autologin_keeps_a_normal_adfs_cookie_set(self):
+        normal = ["SamlSession", "MSISSignOut", "MSISAuthenticated", "MSISLoopDetectionCookie"]
+        browser = SsoBrowser(OUTLOOK_URL, {ADFS: normal})
+        logs: list[str] = []
+        self.authenticator(browser, logs).acquire(
+            mailbox="student@example.edu", interactive=True, timeout_seconds=150.0, assistant=RecordingAssistant()
+        )
+        self.assertFalse(any(args[:1] in (["load"], ["cookie-delete"]) for args in browser.calls))
+        self.assertEqual(browser.cookies[ADFS], normal)
+        self.assertEqual(logs, [])
+
+    def test_overgrowth_threshold(self):
+        self.assertFalse(adfs_overgrown(["SamlSession", "SamlSession1", "SamlSession2", "MSISAuthenticated"]))
+        self.assertTrue(adfs_overgrown(["SamlSession", "SamlSession3"]))
+        self.assertTrue(adfs_overgrown([f"c{index}" for index in range(9)]))
+        self.assertFalse(adfs_overgrown([f"c{index}" for index in range(8)]))
 
 
 class VimbrowserAuthenticatorTests(unittest.TestCase):
