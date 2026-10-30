@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -23,6 +24,18 @@ POLL_SECONDS = 0.5
 # only a human or the auto-login can continue from there.
 SIGN_IN_SETTLE_POLLS = 10
 CONTEXT_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
+# U of T's ADFS piles up session-only SSO cookies (SamlSession chunks, MSIS*)
+# in a context that never restarts, until it answers HTTP 400 "Header Field Too
+# Long". Clearing that host's cookies only forces a fresh U of T sign-in; the
+# renewable Microsoft/Outlook session lives on other hosts and is never touched.
+ADFS_HOST = "sts.ad.utoronto.ca"
+ADFS_URL = "https://sts.ad.utoronto.ca/adfs/ls/"
+SSO_HOSTS = frozenset({ADFS_HOST, autologin.WEBLOGIN_HOST})
+ADFS_COOKIE_LIMIT = 8
+ADFS_CHUNK_LIMIT = 3
+SAML_CHUNK_PATTERN = re.compile(r"^SamlSession([0-9]+)$")
+COOKIE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,128}$")
+SSO_SETTLE_SECONDS = 15.0
 
 
 CAPTURE_JS = r"""
@@ -84,6 +97,20 @@ TRIGGER_JS = r"""
 
 
 READ_CAPTURE_JS = "window.__utmailImportedBearer || ''"
+
+
+# Reads only the error page's status and headline; no cookies or form data.
+SSO_ERROR_PROBE_JS = r"""
+(() => {
+  const nav = performance.getEntriesByType('navigation')[0];
+  const text = ((document.title || '') + '\n' + (document.body ? document.body.innerText : '')).slice(0, 4096);
+  return JSON.stringify({
+    host: location.hostname,
+    status: nav && typeof nav.responseStatus === 'number' ? nav.responseStatus : 0,
+    tooLong: /Header Field Too Long|Request Header Or Cookie Too Large/i.test(text)
+  });
+})()
+""".strip()
 
 
 TOKEN_DISCOVERY_JS = rf"""
@@ -149,6 +176,26 @@ class BrowserTab:
     url: str
     active: bool
     context: str | None = None
+    loading: bool = False
+
+
+def _sso_host(url: str) -> str | None:
+    """The U of T sign-in host whose cookies the helper may clear, if any."""
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return None
+    host = parts.hostname or ""
+    if parts.scheme == "https" and port in (None, 443) and host in SSO_HOSTS:
+        return host
+    return None
+
+
+def adfs_overgrown(names: list[str]) -> bool:
+    """True once ADFS cookies near the header limit that broke sign-in on Oct 30 2026."""
+    chunks = [int(match.group(1)) for match in map(SAML_CHUNK_PATTERN.fullmatch, names) if match]
+    return len(names) > ADFS_COOKIE_LIMIT or any(chunk >= ADFS_CHUNK_LIMIT for chunk in chunks)
 
 
 def run_vimbrowser(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -249,6 +296,7 @@ class VimbrowserDelegate:
                     url=str(row.get("url") or ""),
                     active=tab_id == active or bool(row.get("active")),
                     context=context,
+                    loading=row.get("loading") is True,
                 )
             )
         return active, result
@@ -391,8 +439,15 @@ class VimbrowserImporter(VimbrowserDelegate):
 class VimbrowserAuthenticator(VimbrowserDelegate):
     """Acquire renewable OWA credentials through one isolated named context."""
 
-    def __init__(self, *, context: str | None = None, **kwargs: Any):
+    def __init__(
+        self,
+        *,
+        context: str | None = None,
+        log: Callable[[str], None] | None = None,
+        **kwargs: Any,
+    ):
         super().__init__(**kwargs)
+        self.log = log or (lambda message: print(message, file=sys.stderr))
         self.context = vimbrowser_context() if context is None else context
         if not isinstance(self.context, str) or not CONTEXT_PATTERN.fullmatch(self.context):
             raise BrowserImportError(
@@ -401,6 +456,110 @@ class VimbrowserAuthenticator(VimbrowserDelegate):
 
     def _remaining(self, deadline: float) -> float:
         return max(0.1, min(COMMAND_TIMEOUT_SECONDS, deadline - self.clock()))
+
+    def _host_cookie_names(
+        self,
+        tab_id: int,
+        host: str,
+        *,
+        url: str | None = None,
+        timeout: float = COMMAND_TIMEOUT_SECONDS,
+    ) -> tuple[list[str], set[str]]:
+        """Names of ``host``'s cookies visible to the tab URL (or ``url``) in this
+        context, plus names that other domains also use there. Values are never
+        requested and any returned value is dropped unread."""
+        arguments = ["cookies", str(tab_id)] + ([url] if url else [])
+        rows = self._json(self._run(*arguments, timeout=timeout), "cookies").get("cookies")
+        if not isinstance(rows, list):
+            raise BrowserImportError("vimbrowser did not return a cookie list")
+        own: list[str] = []
+        other: set[str] = set()
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get("name"), str) or not row["name"]:
+                continue
+            domain = str(row.get("domain") or "").lstrip(".").casefold()
+            if domain == host:
+                own.append(row["name"])
+            else:
+                other.add(row["name"])
+        return own, other
+
+    def _clear_sso_cookies(self, tab_id: int, host: str, reason: str, deadline: float) -> int:
+        """Delete ``host``'s cookies through the exact helper tab resting on it."""
+        _, tabs = self.tabs(timeout=self._remaining(deadline))
+        matches = [tab for tab in tabs if tab.id == tab_id]
+        if len(matches) != 1 or matches[0].context != self.context or _sso_host(matches[0].url) != host:
+            raise BrowserImportError(f"the helper tab is no longer on {host}")
+        own, other = self._host_cookie_names(tab_id, host, timeout=self._remaining(deadline))
+        # cookie-delete matches by name for the tab URL: skip a name another
+        # domain also uses there, so only this host's own cookies go.
+        names = [name for name in dict.fromkeys(own) if name not in other and COOKIE_NAME_PATTERN.fullmatch(name)]
+        deleted = 0
+        for name in names:
+            result = self._json(
+                self._run("cookie-delete", str(tab_id), name, timeout=self._remaining(deadline)),
+                "cookie-delete",
+            ).get("deleted")
+            if isinstance(result, int) and not isinstance(result, bool) and result > 0:
+                deleted += result
+        self.log(
+            f"utmail: {reason}; cleared {deleted} {host} cookies in vimbrowser context "
+            f"{self.context}: {', '.join(names) or 'none'}"
+        )
+        return deleted
+
+    def _recover_rejected_sign_in(self, tab_id: int, url: str, recovered: set[str], deadline: float) -> bool:
+        """Clear a U of T sign-in host's cookies and reload once if it answered
+        HTTP 400 (e.g. ADFS "Header Field Too Long"); True when it reloaded."""
+        host = _sso_host(url)
+        if host is None or host in recovered:
+            return False
+        try:
+            frame_id = self._frame_id(tab_id, timeout=self._remaining(deadline))
+            page = self._js_object(
+                self._frame_js(tab_id, frame_id, SSO_ERROR_PROBE_JS, timeout=self._remaining(deadline))
+            )
+        except BrowserImportError:
+            return False  # Mid-navigation; probe again on the next poll.
+        if page.get("host") != host or not (page.get("tooLong") is True or page.get("status") == 400):
+            return False
+        recovered.add(host)
+        detail = "Header Field Too Long" if page.get("tooLong") is True else "HTTP 400"
+        try:
+            self._clear_sso_cookies(tab_id, host, f"{host} answered {detail}", deadline)
+            self._run("reload", str(tab_id), timeout=self._remaining(deadline))
+        except BrowserImportError as error:
+            self.log(f"utmail: could not recover from {host} {detail}: {error.message}")
+            return False
+        return True
+
+    def _prune_adfs_cookies(self, tab_id: int, deadline: float) -> None:
+        """Before an unattended sign-in, clear ADFS cookies that are nearing the
+        header limit. Listing needs no navigation; deleting needs the exact tab
+        on ADFS, so visit it briefly and then return to Outlook."""
+        try:
+            names, _ = self._host_cookie_names(tab_id, ADFS_HOST, url=ADFS_URL, timeout=self._remaining(deadline))
+        except BrowserImportError:
+            return
+        if not adfs_overgrown(names):
+            return
+        settle = min(deadline, self.clock() + SSO_SETTLE_SECONDS)
+        try:
+            self._run("load", str(tab_id), ADFS_URL, timeout=self._remaining(deadline))
+            while True:
+                _, tabs = self.tabs(timeout=self._remaining(deadline))
+                matches = [tab for tab in tabs if tab.id == tab_id]
+                if len(matches) == 1 and not matches[0].loading and _sso_host(matches[0].url) == ADFS_HOST:
+                    break
+                if self.clock() >= settle:
+                    raise BrowserImportError(f"the helper tab did not reach {ADFS_HOST}")
+                self.sleeper(POLL_SECONDS)
+            self._clear_sso_cookies(
+                tab_id, ADFS_HOST, f"{len(names)} {ADFS_HOST} cookies before automatic re-login", deadline
+            )
+        except BrowserImportError as error:
+            self.log(f"utmail: could not prune {ADFS_HOST} cookies: {error.message}")
+        self._run("load", str(tab_id), OUTLOOK_URL, timeout=self._remaining(deadline))
 
     def _new_context_tab(
         self,
@@ -510,6 +669,8 @@ class VimbrowserAuthenticator(VimbrowserDelegate):
                 )
             helper_tab = self._new_context_tab(opened, before_ids=before_ids)
             helper_tab_id = helper_tab.id
+            if assistant is not None:
+                self._prune_adfs_cookies(helper_tab_id, deadline)
             if interactive:
                 # Duo's browser check is visibility-sensitive in vimbrowser.  A
                 # persistent interactive login is explicitly user-visible, so
@@ -517,6 +678,7 @@ class VimbrowserAuthenticator(VimbrowserDelegate):
                 self._run("focus", str(helper_tab_id), timeout=self._remaining(deadline))
 
             settled = 0
+            recovered: set[str] = set()
             while self.clock() < deadline:
                 _, tabs = self.tabs(timeout=self._remaining(deadline))
                 matches = [tab for tab in tabs if tab.id == helper_tab_id]
@@ -525,6 +687,10 @@ class VimbrowserAuthenticator(VimbrowserDelegate):
                 tab = matches[0]
                 if tab.context != self.context:
                     raise BrowserImportError("the helper-opened tab changed browser context")
+                if self._recover_rejected_sign_in(helper_tab_id, tab.url, recovered, deadline):
+                    settled = 0
+                    self.sleeper(min(POLL_SECONDS, max(0.0, deadline - self.clock())))
+                    continue
                 if assistant is not None:
                     # Unattended re-login (autologin.py): fill U of T weblogin
                     # and approve our own Duo push in this exact helper tab.
