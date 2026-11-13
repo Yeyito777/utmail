@@ -8,7 +8,7 @@ import time
 import unittest
 
 from helpers import token
-from utmail_tool.errors import BrowserImportError, SessionRequiredError
+from utmail_tool.errors import BrowserImportError, NetworkError, SessionRequiredError
 from utmail_tool.session import OWA_APP_ID
 from utmail_tool.vimbrowser import (
     ADFS_URL,
@@ -377,6 +377,67 @@ class VimbrowserAuthenticatorTests(unittest.TestCase):
         self.assertFalse(any(command[0] == "focus" for command in commands))
         self.assertFalse(any(command[:1] == ["frame-tree"] for command in commands))
 
+    def test_outlook_that_never_loads_is_an_outage_not_a_sign_in(self):
+        # Nov 12 2026: Outlook's frontends were unreachable; the cached app
+        # shell sat on its splash with no sign-in page, and UTmail wrongly
+        # demanded human reauthentication (firing the auto-login too).
+        class StuckOutlookRunner(AuthRunner):
+            def __call__(self, command, **kwargs):
+                if command[1:2] == ["frame-tree"]:
+                    self.calls.append((command, kwargs.get("input"), kwargs["timeout"]))
+                    return subprocess.CompletedProcess(command, 0, json.dumps({"ok": True, "tabid": 9, "main_frame_id": "main"}), "")
+                if command[1:2] == ["frame-js"]:
+                    self.calls.append((command, kwargs.get("input"), kwargs["timeout"]))
+                    result = {"ok": True} if kwargs.get("input") == CAPTURE_JS else {"ok": False, "reason": "account-count"}
+                    return subprocess.CompletedProcess(command, 0, json.dumps({"ok": True, "tabid": 9, "result": json.dumps(result)}), "")
+                return super().__call__(command, **kwargs)
+
+        for interactive in (False, True):
+            clock = FakeClock()
+            runner = StuckOutlookRunner()
+            auth = VimbrowserAuthenticator(context="utmail-helper", runner=runner, clock=clock, sleeper=clock.sleep)
+            with self.assertRaises(NetworkError) as caught:
+                auth.acquire(mailbox="student@example.edu", interactive=interactive, timeout_seconds=5.0)
+            self.assertNotIsInstance(caught.exception, SessionRequiredError)
+            self.assertIn("no login is needed", caught.exception.message)
+            commands = [call[0][1:] for call in runner.calls]
+            self.assertIn(["close-tab", "9"], commands)
+
+    def test_outlook_outage_skips_the_unattended_re_login(self):
+        import tempfile
+        from pathlib import Path
+        from utmail_tool.renewal import load_or_refresh_session
+        from utmail_tool.session import OwaSession, save_session
+
+        class DownAuthenticator:
+            def acquire(self, **kwargs):
+                raise NetworkError("Outlook Web never finished loading")
+
+        def auto_login(*args, **kwargs):
+            raise AssertionError("an outage must not start a Duo-backed re-login")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            current = OwaSession.from_vimbrowser_bearer(
+                token(marker="stale"),
+                mailbox="student@example.edu",
+                source="vimbrowser-context:utmail-helper",
+            )
+            # Imported expired tokens are rejected, so expire a current one.
+            stale = OwaSession.from_dict({
+                **current.__dict__,
+                "access_token": token(marker="stale", expires=int(time.time()) - 60),
+                "expires_at": int(time.time()) - 60,
+            })
+            save_session(stale, path=root / "s.json", lock=root / "s.lock")
+            with self.assertRaises(NetworkError):
+                load_or_refresh_session(
+                    path=root / "s.json",
+                    lock=root / "s.lock",
+                    browser_authenticator=DownAuthenticator(),
+                    auto_login=auto_login,
+                )
+
     def test_silent_renewal_stops_early_once_resting_on_weblogin(self):
         clock = FakeClock()
         runner = AuthRunner(page_url="https://idpz.utorauth.utoronto.ca/idp/profile/SAML2/Redirect/SSO?execution=e1s1")
@@ -578,7 +639,8 @@ class VimbrowserAuthenticatorTests(unittest.TestCase):
             clock=clock,
             sleeper=clock.sleep,
         )
-        with self.assertRaises(SessionRequiredError) as caught:
+        # The tab never left Outlook, so this reads as an outage, not a sign-in.
+        with self.assertRaises(NetworkError) as caught:
             auth.acquire(
                 mailbox="student@example.edu",
                 interactive=False,

@@ -10,7 +10,7 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from . import autologin
-from .errors import BrowserImportError, SessionRequiredError
+from .errors import BrowserImportError, NetworkError, SessionRequiredError
 from .paths import vimbrowser_cli, vimbrowser_context
 from .session import DEFAULT_MAILBOX, OWA_APP_ID, OwaSession
 
@@ -679,6 +679,11 @@ class VimbrowserAuthenticator(VimbrowserDelegate):
 
             settled = 0
             recovered: set[str] = set()
+            # True once the tab is seen anywhere but Outlook (Microsoft or U of T
+            # sign-in, an SSO error page).  A tab that never leaves Outlook yet
+            # yields no session is an Outlook outage or network failure, not a
+            # sign-in problem: no human or auto-login can fix it.
+            left_outlook = False
             while self.clock() < deadline:
                 _, tabs = self.tabs(timeout=self._remaining(deadline))
                 matches = [tab for tab in tabs if tab.id == helper_tab_id]
@@ -687,6 +692,8 @@ class VimbrowserAuthenticator(VimbrowserDelegate):
                 tab = matches[0]
                 if tab.context != self.context:
                     raise BrowserImportError("the helper-opened tab changed browser context")
+                if not self._is_outlook_url(tab.url):
+                    left_outlook = True
                 if self._recover_rejected_sign_in(helper_tab_id, tab.url, recovered, deadline):
                     settled = 0
                     self.sleeper(min(POLL_SECONDS, max(0.0, deadline - self.clock())))
@@ -805,6 +812,11 @@ class VimbrowserAuthenticator(VimbrowserDelegate):
                 except BrowserImportError:
                     pass
 
+        if not left_outlook:
+            raise NetworkError(
+                "Outlook Web never finished loading in the helper tab and no sign-in page appeared; "
+                "Microsoft's Outlook service or the network is likely down, so no login is needed. Retry later"
+            )
         if interactive:
             raise SessionRequiredError(
                 "persistent login did not finish; rerun `utmail login --persistent` and complete Microsoft/U of T sign-in"
